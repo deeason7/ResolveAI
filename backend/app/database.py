@@ -21,6 +21,7 @@ _engine_kwargs: dict = {"echo": settings.environment == "development"}
 if _is_sqlite:
     # SQLite in-memory needs StaticPool + same-thread disabled; no pool sizing
     from sqlalchemy.pool import StaticPool
+
     _engine_kwargs["connect_args"] = {"check_same_thread": False}
     _engine_kwargs["poolclass"] = StaticPool
 else:

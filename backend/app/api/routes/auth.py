@@ -55,9 +55,7 @@ def _set_refresh_cookie(response: Response, token: str) -> None:
     )
 
 
-async def _audit(
-    session: AsyncSession, request: Request, user_id: "uuid.UUID", event: str
-) -> None:
+async def _audit(session: AsyncSession, request: Request, user_id: "uuid.UUID", event: str) -> None:
     log = AuditLog(
         user_id=user_id,
         event=event,
@@ -87,7 +85,7 @@ async def register(
         hashed_password=hash_password(body.password),
     )
     session.add(user)
-    await session.flush()   # get the UUID before commit
+    await session.flush()  # get the UUID before commit
 
     await _audit(session, request, user.id, "register")
 
@@ -115,9 +113,7 @@ async def login(
 
     # Constant-time comparison to prevent user-enumeration timing attacks
     if user is None or not verify_password(body.password, user.hashed_password):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials"
-        )
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
@@ -146,13 +142,13 @@ async def refresh(
 
     payload = decode_refresh_token(refresh_token)
     if payload is None or payload.get("type") != "refresh":
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token")
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+        )
 
     async with _redis() as r:
         if await r.exists(f"{REFRESH_BLOCKLIST_PREFIX}{refresh_token}"):
-            raise HTTPException(
-                status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked"
-            )
+            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
 
     user = await session.get(User, uuid.UUID(payload["sub"]))
     if user is None or not user.is_active:

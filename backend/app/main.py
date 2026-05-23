@@ -15,7 +15,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import auth
+from app.api.routes import auth, complaints
 from app.config import settings
 from app.middleware.rate_limit import limiter
 
@@ -56,6 +56,7 @@ def create_app() -> FastAPI:
 
     # Routers
     app.include_router(auth.router, prefix="/api/v1")
+    app.include_router(complaints.router, prefix="/api/v1")
 
     @app.get("/api/v1/health", tags=["infra"])
     async def health() -> dict:

@@ -10,7 +10,7 @@ services:
     volumes:
       - postgres_data:/var/lib/postgresql/data
     ports:
-      - "5432:5432"
+      - "5433:5432"
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER} -d ${POSTGRES_DB}"]
       interval: 10s
@@ -24,7 +24,7 @@ services:
     volumes:
       - redis_data:/data
     ports:
-      - "6379:6379"
+      - "6380:6379"
     healthcheck:
       test: ["CMD", "redis-cli", "-a", "${REDIS_PASSWORD}", "ping"]
       interval: 10s
@@ -37,9 +37,9 @@ services:
     volumes:
       - qdrant_data:/qdrant/storage
     ports:
-      - "6333:6333"
+      - "6334:6333"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:6333/healthz || exit 1"]
+      test: ["CMD-SHELL", "bash -c '> /dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -53,8 +53,8 @@ services:
     volumes:
       - neo4j_data:/data
     ports:
-      - "7474:7474"   # browser
-      - "7687:7687"   # bolt
+      - "7475:7474"   # browser
+      - "7688:7687"   # bolt
     healthcheck:
       test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
       interval: 15s
@@ -67,9 +67,9 @@ services:
     volumes:
       - ollama_data:/root/.ollama
     ports:
-      - "11434:11434"
+      - "11435:11434"
     healthcheck:
-      test: ["CMD-SHELL", "curl -sf http://localhost:11434/api/tags || exit 1"]
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
       interval: 15s
       timeout: 10s
       retries: 10
@@ -81,7 +81,7 @@ services:
       dockerfile: Dockerfile
     env_file: .env
     ports:
-      - "8000:8000"
+      - "8010:8000"
     depends_on:
       postgres:
         condition: service_healthy
@@ -91,6 +91,8 @@ services:
         condition: service_healthy
     volumes:
       - ./backend:/app    # hot-reload in dev
+      - ./scripts:/scripts
+      - ./fine_tuning:/fine_tuning
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
       interval: 15s
@@ -104,7 +106,7 @@ services:
       dockerfile: Dockerfile
     env_file: .env
     ports:
-      - "8501:8501"
+      - "8511:8501"
     depends_on:
       api:
         condition: service_healthy

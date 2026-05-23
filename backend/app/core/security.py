@@ -12,7 +12,6 @@ Revoked refresh tokens are tracked in Redis (blocklist pattern).
 import hashlib
 import logging
 from datetime import UTC, datetime, timedelta
-from typing import Optional
 
 import bcrypt
 import jwt
@@ -62,7 +61,7 @@ def create_refresh_token(user_id: str) -> str:
     )
 
 
-def decode_access_token(token: str) -> Optional[dict]:
+def decode_access_token(token: str) -> dict | None:
     """Decode and validate an access token. Returns None on any failure."""
     try:
         return jwt.decode(token, settings.jwt_secret_key, algorithms=[settings.jwt_algorithm])
@@ -74,7 +73,7 @@ def decode_access_token(token: str) -> Optional[dict]:
         return None
 
 
-def decode_refresh_token(token: str) -> Optional[dict]:
+def decode_refresh_token(token: str) -> dict | None:
     """Decode and validate a refresh token. Returns None on any failure."""
     try:
         return jwt.decode(

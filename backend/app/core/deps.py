@@ -7,8 +7,8 @@ Any route that needs the current user just declares:
 FastAPI injects it automatically — the route itself never touches JWT logic.
 """
 
-import uuid
 import logging
+import uuid
 
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
@@ -16,7 +16,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.security import decode_access_token
 from app.database import get_session
-from app.models.user import User
+from app.models.user import User, UserRole
 
 logger = logging.getLogger(__name__)
 
@@ -55,3 +55,13 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
 
     return user
+
+
+def require_admin(current_user: User = Depends(get_current_user)) -> User:
+    """Gate a route to admin users only. Mounts on top of get_current_user."""
+    if current_user.role != UserRole.admin:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Admin role required",
+        )
+    return current_user

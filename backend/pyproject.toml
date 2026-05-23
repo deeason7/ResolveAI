@@ -1,6 +1,6 @@
 [build-system]
 requires = ["setuptools>=69"]
-build-backend = "setuptools.backends.legacy:build"
+build-backend = "setuptools.build_meta"
 
 [project]
 name = "resolveai-backend"
@@ -26,7 +26,7 @@ dependencies = [
     "slowapi>=0.1.9,<1.0",
 
     # Validation / settings
-    "pydantic>=2.7,<3.0",
+    "pydantic[email]>=2.7,<3.0",
     "pydantic-settings>=2.3,<3.0",
 
     # Redis
@@ -67,7 +67,11 @@ target-version = "py311"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "PIE"]
-ignore = ["E501"]   # line length handled by formatter
+ignore = [
+    "E501",   # line length — handled by formatter
+    "B008",   # Depends()/Query() in defaults — required by FastAPI
+    "UP042",  # str + Enum → StrEnum migration — deferred refactor
+]
 
 [tool.ruff.format]
 quote-style = "double"
