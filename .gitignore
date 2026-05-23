@@ -1,0 +1,90 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Distribution / packaging
+pip-wheel-metadata/
+share/python-wheels/
+*.egg-info/
+
+# Testing
+.pytest_cache/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+htmlcov/
+.tox/
+.hypothesis/
+
+# Type checking
+.mypy_cache/
+.dmypy.json
+dmypy.json
+.pyright/
+pyrightconfig.json
+
+# Jupyter
+.ipynb_checkpoints
+*.ipynb
+
+# Data files
+fine_tuning/data/raw/
+fine_tuning/data/processed/
+fine_tuning/models/
+*.csv
+*.parquet
+*.pkl
+*.bin
+*.safetensors
+
+# Docker
+.docker/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Secrets
+.env
+*.pem
+*.key
+secrets/
+
+# Logs
+*.log
+logs/
+
+# Node (frontend tooling if ever needed)
+node_modules/
+npm-debug.log*
