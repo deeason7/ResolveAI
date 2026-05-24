@@ -33,7 +33,7 @@ services:
 
   # ── Vector Database ────────────────────────────────────────────────────────
   qdrant:
-    image: qdrant/qdrant:v1.9.2
+    image: qdrant/qdrant:v1.13.6
     volumes:
       - qdrant_data:/qdrant/storage
     ports:

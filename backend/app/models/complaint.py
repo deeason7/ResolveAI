@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
+from sqlalchemy import String
 from sqlmodel import Field, SQLModel
 
 
@@ -37,7 +38,14 @@ class Complaint(SQLModel, table=True):
     date_received: datetime | None = None
 
     # Classification outputs (filled by the SLM worker)
-    status: ComplaintStatus = Field(default=ComplaintStatus.pending, index=True)
+    # sa_type=String(50) keeps the Python enum for type safety but stores as
+    # VARCHAR — matches the initial migration, avoids a native Postgres enum
+    # type and the migration overhead that comes with it.
+    status: ComplaintStatus = Field(
+        default=ComplaintStatus.pending,
+        index=True,
+        sa_type=String(50),
+    )
     sentiment: str | None = Field(default=None, max_length=50)
     intent: str | None = Field(default=None, max_length=100)
     urgency: int | None = Field(default=None, ge=1, le=5)
