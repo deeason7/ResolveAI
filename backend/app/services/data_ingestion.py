@@ -104,9 +104,14 @@ async def _flush_batch(batch: list[dict]) -> int:
 
 async def ingest_cfpb_csv(
     csv_path: Path | str,
-    batch_size: int = 10_000,
+    batch_size: int = 1500,
 ) -> IngestResult:
-    """Stream a normalized CFPB CSV into the complaints table."""
+    """Stream a normalized CFPB CSV into the complaints table.
+
+    batch_size is bounded by Postgres' wire-protocol limit of 32767 bind
+    parameters per statement. With ~17 columns per row, 1500 rows uses
+    ~25500 params — comfortably under the cap with headroom if columns grow.
+    """
     path = Path(csv_path)
     if not path.exists():
         raise FileNotFoundError(f"CSV not found: {path}")
