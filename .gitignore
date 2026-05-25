@@ -57,12 +57,15 @@ pyrightconfig.json
 # Data files
 fine_tuning/data/raw/
 fine_tuning/data/processed/
+fine_tuning/data/labeled/
+fine_tuning/data/formatted/
 fine_tuning/models/
 *.csv
 *.parquet
 *.pkl
 *.bin
 *.safetensors
+*.jsonl
 
 # Docker
 .docker/
