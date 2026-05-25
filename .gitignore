@@ -53,6 +53,7 @@ pyrightconfig.json
 # Jupyter
 .ipynb_checkpoints
 *.ipynb
+!fine_tuning/colab_train.ipynb
 
 # Data files
 fine_tuning/data/raw/
