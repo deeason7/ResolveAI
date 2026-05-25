@@ -145,6 +145,42 @@ training:
   # output for loss-masking. The default works for HF "messages" format.
 
 # ---------------------------------------------------------------------------
+# Class-imbalance mitigation
+#
+# The CFPB narrative dataset is heavily skewed — see audit_labels.py output:
+# ~53% negative / 45% extreme_negative / 2% neutral. Vanilla SFT minimizes
+# average loss and would happily ignore the minority class to get there. We
+# compensate by weighting per-example loss by an inverse-frequency factor
+# derived from the sentiment label of each training example.
+#
+# When disabled the trainer behaves identically to a stock SFTTrainer, so
+# you can A/B with this single toggle.
+# ---------------------------------------------------------------------------
+class_weights:
+  # Master switch. With false, vanilla SFT; with true, the WeightedSFTTrainer
+  # subclass kicks in and applies per-example weighting at compute_loss time.
+  enabled: true
+
+  # How to derive the weights from the train split's class frequencies:
+  #   sqrt_inverse_freq — weight = sqrt(N_total / (K * N_class))
+  #     Gentler. Reduces over-correction on tiny classes where the inverse
+  #     frequency itself would be a 25-50× multiplier on noisy labels.
+  #   inverse_freq      — weight = N_total / (K * N_class)
+  #     Full compensation. Use when the minority class is well-labeled and
+  #     you'd rather overfit minority noise than miss minority signal.
+  #   none              — uniform weights = 1.0 (same as enabled=false).
+  method: "sqrt_inverse_freq"
+
+  # Per-class multiplier applied AFTER the method-based weight. Lets you
+  # nudge individual classes without recomputing — e.g. set neutral: 1.5 to
+  # boost it 50% above the sqrt-inverse value. Defaults to 1.0 for any
+  # class not listed here.
+  manual_scale:
+    neutral: 1.0
+    negative: 1.0
+    extreme_negative: 1.0
+
+# ---------------------------------------------------------------------------
 # Data paths
 #
 # Relative paths are resolved against the script's parent directory
