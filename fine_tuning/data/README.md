@@ -32,6 +32,14 @@ docker compose exec api python fine_tuning/audit_labels.py \
 
 # 5. Format into train/val/test splits
 docker compose exec api python fine_tuning/02_format_training_data.py
+
+# 6. Train on Colab T4 (see fine_tuning/03_train_qlora.py docstring)
+
+# 7. Evaluate the trained adapter (on Colab; --dry-run works locally)
+python fine_tuning/04_evaluate.py \
+  --adapter-dir ./resolveai-sentiment-lora \
+  --test-path fine_tuning/data/formatted/test.jsonl \
+  --output-dir fine_tuning/results
 ```
 
 ## Why gitignored
@@ -41,3 +49,4 @@ docker compose exec api python fine_tuning/02_format_training_data.py
 - `formatted/` — derivable from `labeled/` plus the formatting script.
 - `models/` — fine-tuned adapter weights and merged GGUF artifacts. Multi-GB; lives on HF Hub / Drive.
 - `audit/` — derivable from `labeled/` plus the audit script; the CSV sample contains narrative excerpts.
+- `results/` (sibling to `data/`) — eval metrics, confusion matrix PNGs, prediction dumps. Re-creatable by re-running `04_evaluate.py`.
