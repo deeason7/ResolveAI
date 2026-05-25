@@ -1,11 +1,19 @@
 """
 Generate teacher labels for the QLoRA fine-tuning dataset.
 
-For each candidate complaint we ask a strong teacher LLM (Llama 3.3 70B
-via Groq) to produce a structured `ComplaintClassification`, validated by
-instructor against the shared Pydantic schema, and persist both to the
-`complaint_labels` table (the source of truth) and to a JSONL artifact
-under `fine_tuning/data/labeled/` (for Colab consumption later).
+For each candidate complaint we ask a strong teacher LLM to produce a
+structured `ComplaintClassification`, validated by instructor against the
+shared Pydantic schema, and persist both to the `complaint_labels` table
+(the source of truth) and to a JSONL artifact under
+`fine_tuning/data/labeled/` (for Colab consumption later).
+
+Two teacher providers are supported (selected with --provider):
+    bedrock — AWS Bedrock Converse API, default model
+              us.meta.llama3-3-70b-instruct-v1:0 (cross-region inference
+              profile, on-demand serverless, ~$0.72/M tokens in/out).
+    groq    — Groq's free tier, default model llama-3.3-70b-versatile.
+              Subject to a 100K-tokens/day cap; the run fast-exits with
+              code 1 when the cap is hit so cron can resume tomorrow.
 
 The script is fully idempotent and resumable: at startup we query the
 set of complaint_ids already labeled by this source and skip them.
@@ -16,7 +24,8 @@ Usage (inside the api container):
 
     PYTHONPATH=/app python /fine_tuning/01_prepare_labels.py
     PYTHONPATH=/app python /fine_tuning/01_prepare_labels.py --limit 100
-    PYTHONPATH=/app python /fine_tuning/01_prepare_labels.py --concurrency 3
+    PYTHONPATH=/app python /fine_tuning/01_prepare_labels.py --provider bedrock --concurrency 5
+    PYTHONPATH=/app python /fine_tuning/01_prepare_labels.py --provider groq --concurrency 3
 
 Exit codes:
     0  — finished cleanly (either hit --limit or labeled every candidate)
@@ -51,7 +60,7 @@ from openai import AsyncOpenAI, RateLimitError  # noqa: E402
 from sqlmodel import select  # noqa: E402
 from tenacity import (  # noqa: E402
     retry,
-    retry_if_exception_type,
+    retry_if_exception,
     stop_after_attempt,
     wait_exponential,
 )
@@ -69,20 +78,52 @@ logging.basicConfig(
 )
 log = logging.getLogger("prepare_labels")
 
-# Keep the run log readable — SQLAlchemy's engine echo is meant for app
-# debugging, not a multi-day batch job.
-logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
-logging.getLogger("openai").setLevel(logging.WARNING)
-logging.getLogger("httpx").setLevel(logging.WARNING)
+# Keep the run log readable — SQLAlchemy's `echo=True` (set when
+# ENVIRONMENT=development) explicitly forces `sqlalchemy.engine.Engine`
+# to INFO. That explicit level on the child wins over any level we set
+# on the parent `sqlalchemy` logger, so we have to silence the leaf
+# loggers by name. We also flip echo off on the engine itself for
+# belt-and-braces — same effect, different vector.
+for _name in (
+    "sqlalchemy",
+    "sqlalchemy.engine",
+    "sqlalchemy.engine.Engine",
+    "sqlalchemy.pool",
+    "sqlalchemy.dialects",
+    "openai",
+    "httpx",
+    "botocore",
+    "boto3",
+    "urllib3",
+):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+try:
+    from app.database import engine as _db_engine
 
-DEFAULT_MODEL = "llama-3.3-70b-versatile"
-DEFAULT_CONCURRENCY = 3  # well under Groq's 30 rpm to leave headroom for retries
+    _db_engine.echo = False
+except Exception:  # noqa: BLE001 — best-effort, the loggers above already cover it
+    pass
+
+GROQ_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+BEDROCK_DEFAULT_MODEL = "us.meta.llama3-3-70b-instruct-v1:0"
+DEFAULT_PROVIDER = "bedrock"
+# Groq throttles aggressively (30 rpm free tier), Bedrock on-demand starts
+# at hundreds of rpm — so the safe concurrency floor differs by provider.
+DEFAULT_CONCURRENCY_BY_PROVIDER = {"groq": 3, "bedrock": 5}
 DEFAULT_LIMIT = 10_000
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 MIN_NARRATIVE_CHARS = 50
 # Groq surfaces two distinct 429s: per-minute (recoverable via backoff) and
-# per-day (won't recover today — exit and let cron retry tomorrow).
+# per-day (won't recover today — exit and let cron retry tomorrow). Bedrock
+# on-demand has no equivalent daily cap, so this only fires for Groq.
 DAILY_CAP_PHRASES = ("tokens per day", "(tpd)", "rpd")
+# botocore error codes that indicate "back off and retry" rather than "give up"
+BEDROCK_THROTTLE_CODES = (
+    "ThrottlingException",
+    "ServiceQuotaExceededException",
+    "TooManyRequestsException",
+    "ModelTimeoutException",
+)
 CHUNK_MULTIPLIER = 4  # micro-batch size = concurrency × this; controls how
 #                       often we check the cap flag between gather calls
 
@@ -108,6 +149,7 @@ def _is_daily_cap_error(err: BaseException) -> bool:
             return True
         cur = cur.__cause__ or cur.__context__
     return False
+
 
 RUBRIC_PATH = Path(__file__).parent / "prompts" / "labeling_prompt.md"
 DEFAULT_OUTPUT = Path(__file__).parent / "data" / "labeled" / "gold_labels.jsonl"
@@ -169,56 +211,165 @@ async def _fetch_candidates(
     return picked
 
 
-def _make_client() -> instructor.AsyncInstructor:
-    if not settings.groq_api_key:
-        log.critical("GROQ_API_KEY is empty. Set it in .env and restart.")
-        sys.exit(2)
-    raw = AsyncOpenAI(api_key=settings.groq_api_key, base_url=GROQ_BASE_URL)
-    return instructor.from_openai(raw, mode=instructor.Mode.JSON)
+def _make_client(provider: str):
+    """Build an instructor client for the chosen provider.
+
+    Returns a tuple (client, is_async). The Groq path uses AsyncOpenAI under
+    the hood (native async). The Bedrock path wraps a sync boto3 client —
+    we'll trampoline calls through asyncio.to_thread to keep the event loop
+    free during the HTTP round-trip.
+    """
+    if provider == "groq":
+        if not settings.groq_api_key:
+            log.critical("GROQ_API_KEY is empty. Set it in .env and restart.")
+            sys.exit(2)
+        raw = AsyncOpenAI(api_key=settings.groq_api_key, base_url=GROQ_BASE_URL)
+        return instructor.from_openai(raw, mode=instructor.Mode.JSON), True
+    if provider == "bedrock":
+        try:
+            import boto3
+        except ImportError:
+            log.critical(
+                "boto3 not installed. Rebuild the api image after the latest "
+                "pyproject.toml change (`docker compose build api`)."
+            )
+            sys.exit(2)
+        # boto3 picks creds from ~/.aws/credentials (mounted into the
+        # container) or AWS_* env vars; we only specify the region.
+        bedrock = boto3.client("bedrock-runtime", region_name=settings.aws_region)
+        # BEDROCK_JSON over BEDROCK_TOOLS: Llama 3.x on Bedrock supports
+        # tool use but rejects `toolConfig.toolChoice.tool` (forced selection),
+        # which is what instructor's BEDROCK_TOOLS mode emits. JSON mode
+        # injects the schema into the prompt and parses the text response —
+        # less rigorous but works on every Converse-API model.
+        mode = getattr(instructor.Mode, "BEDROCK_JSON", None)
+        if mode is None:
+            log.critical(
+                "instructor build lacks Bedrock JSON mode. Upgrade `instructor` "
+                "to a version with Bedrock support (>= 1.5)."
+            )
+            sys.exit(2)
+        return instructor.from_bedrock(bedrock, mode=mode), False
+    log.critical("unknown provider: %s", provider)
+    sys.exit(2)
+
+
+def _is_bedrock_throttle(err: BaseException) -> bool:
+    """Recognize botocore client errors that mean 'slow down, try again'."""
+    try:
+        from botocore.exceptions import ClientError
+    except ImportError:
+        return False
+    if not isinstance(err, ClientError):
+        return False
+    code = err.response.get("Error", {}).get("Code", "")
+    return code in BEDROCK_THROTTLE_CODES
+
+
+def _is_retryable(err: BaseException) -> bool:
+    """Tenacity predicate covering both providers' 'retry-me' shapes."""
+    if isinstance(err, RateLimitError):
+        return True
+    return _is_bedrock_throttle(err)
 
 
 @retry(
-    retry=retry_if_exception_type(RateLimitError),
+    retry=retry_if_exception(_is_retryable),
     wait=wait_exponential(multiplier=2, min=2, max=60),
     stop=stop_after_attempt(6),
     reraise=True,
 )
 async def _label_one(
-    client: instructor.AsyncInstructor,
+    client,
+    is_async: bool,
+    provider: str,
     model: str,
     rubric: str,
     complaint: Complaint,
 ) -> tuple[ComplaintClassification, dict]:
-    """Single Groq call. Returns the parsed result + operational metadata.
+    """Single teacher call. Returns the parsed result + operational metadata.
 
     Raises DailyCapReached (NOT RateLimitError) when the 429 is the
     tokens-per-day variant, so tenacity stops retrying immediately and
     the orchestrator can short-circuit the remaining work.
     """
+    user_text = _build_user_prompt(complaint)
     started = time.monotonic()
     try:
-        result, raw = await client.chat.completions.create_with_completion(
-            model=model,
-            response_model=ComplaintClassification,
-            max_retries=2,  # instructor's own JSON-repair loop, separate from tenacity
-            messages=[
-                {"role": "system", "content": rubric},
-                {"role": "user", "content": _build_user_prompt(complaint)},
-            ],
-            temperature=0.0,
-        )
+        if is_async:
+            # OpenAI-compatible async path (Groq)
+            result, raw = await client.chat.completions.create_with_completion(
+                model=model,
+                response_model=ComplaintClassification,
+                max_retries=2,
+                messages=[
+                    {"role": "system", "content": rubric},
+                    {"role": "user", "content": user_text},
+                ],
+                temperature=0.0,
+            )
+        else:
+            # Bedrock Converse path — sync client trampolined off the loop.
+            # Converse accepts top-level `system=[{"text": ...}]` separately
+            # from `messages`; instructor's adapter handles the translation
+            # when we pass a system-role message in the OpenAI shape.
+            result, raw = await asyncio.to_thread(
+                client.chat.completions.create_with_completion,
+                modelId=model,
+                response_model=ComplaintClassification,
+                max_retries=2,
+                messages=[
+                    {"role": "system", "content": rubric},
+                    {"role": "user", "content": user_text},
+                ],
+                inferenceConfig={"temperature": 0.0, "maxTokens": 1024},
+            )
     except Exception as e:  # noqa: BLE001 — type-agnostic TPD detection
         if _is_daily_cap_error(e):
             raise DailyCapReached(str(e)) from e
         raise
     latency_ms = int((time.monotonic() - started) * 1000)
-    usage = getattr(raw, "usage", None)
     meta = {
-        "input_tokens": getattr(usage, "prompt_tokens", None),
-        "output_tokens": getattr(usage, "completion_tokens", None),
+        "input_tokens": _extract_input_tokens(raw, provider),
+        "output_tokens": _extract_output_tokens(raw, provider),
         "latency_ms": latency_ms,
     }
     return result, meta
+
+
+def _extract_input_tokens(raw, provider: str) -> int | None:
+    """Token-usage field names differ across providers; normalize here."""
+    if raw is None:
+        return None
+    if provider == "groq":
+        usage = getattr(raw, "usage", None)
+        return getattr(usage, "prompt_tokens", None) if usage else None
+    # Bedrock Converse returns {"usage": {"inputTokens": N, "outputTokens": M, ...}}
+    if isinstance(raw, dict):
+        return raw.get("usage", {}).get("inputTokens")
+    # instructor may return an object with .usage attribute regardless
+    usage = getattr(raw, "usage", None)
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage.get("inputTokens") or usage.get("prompt_tokens")
+    return getattr(usage, "inputTokens", None) or getattr(usage, "prompt_tokens", None)
+
+
+def _extract_output_tokens(raw, provider: str) -> int | None:
+    if raw is None:
+        return None
+    if provider == "groq":
+        usage = getattr(raw, "usage", None)
+        return getattr(usage, "completion_tokens", None) if usage else None
+    if isinstance(raw, dict):
+        return raw.get("usage", {}).get("outputTokens")
+    usage = getattr(raw, "usage", None)
+    if usage is None:
+        return None
+    if isinstance(usage, dict):
+        return usage.get("outputTokens") or usage.get("completion_tokens")
+    return getattr(usage, "outputTokens", None) or getattr(usage, "completion_tokens", None)
 
 
 _jsonl_lock = asyncio.Lock()
@@ -283,16 +434,19 @@ async def _run(args: argparse.Namespace) -> int:
     rubric = RUBRIC_PATH.read_text(encoding="utf-8")
     log.info("loaded rubric (%d chars) from %s", len(rubric), RUBRIC_PATH)
 
-    label_source = f"groq:{args.model}"
+    label_source = f"{args.provider}:{args.model}"
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
 
     already = await _load_already_labeled(label_source)
     log.info(
-        "label_source=%s already_labeled=%d target_new=%d",
+        "provider=%s model=%s label_source=%s already_labeled=%d target_new=%d concurrency=%d",
+        args.provider,
+        args.model,
         label_source,
         len(already),
         args.limit,
+        args.concurrency,
     )
 
     candidates = await _fetch_candidates(args.limit, already)
@@ -301,7 +455,7 @@ async def _run(args: argparse.Namespace) -> int:
         return 0
     log.info("fetched %d candidates", len(candidates))
 
-    client = _make_client()
+    client, is_async = _make_client(args.provider)
     sem = asyncio.Semaphore(args.concurrency)
     cap_event = asyncio.Event()
     counters = {"ok": 0, "rate_limited": 0, "other": 0, "tokens_in": 0, "tokens_out": 0}
@@ -314,7 +468,9 @@ async def _run(args: argparse.Namespace) -> int:
             if cap_event.is_set():
                 return
             try:
-                result, meta = await _label_one(client, args.model, rubric, c)
+                result, meta = await _label_one(
+                    client, is_async, args.provider, args.model, rubric, c
+                )
             except DailyCapReached as e:
                 cap_event.set()
                 log.warning("daily token cap reached on %s: %s", c.id, str(e)[:200])
@@ -324,9 +480,9 @@ async def _run(args: argparse.Namespace) -> int:
                     cap_event.set()
                     log.warning("daily token cap reached on %s (wrapped)", c.id)
                     return
-                if isinstance(e, RateLimitError):
+                if _is_retryable(e):
                     counters["rate_limited"] += 1
-                    log.warning("rate-limit on %s: %s", c.id, str(e)[:200])
+                    log.warning("throttle on %s: %s", c.id, str(e)[:200])
                     return
                 counters["other"] += 1
                 log.warning("labeling failed for %s: %s", c.id, str(e)[:200])
@@ -367,8 +523,7 @@ async def _run(args: argparse.Namespace) -> int:
 
     elapsed = time.monotonic() - started
     log.info(
-        "DONE: ok=%d rate_limited=%d other_errors=%d "
-        "tokens_in=%d tokens_out=%d in %.1fs",
+        "DONE: ok=%d rate_limited=%d other_errors=%d tokens_in=%d tokens_out=%d in %.1fs",
         counters["ok"],
         counters["rate_limited"],
         counters["other"],
@@ -387,8 +542,21 @@ async def _run(args: argparse.Namespace) -> int:
 
 
 def _parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="Label complaints with Groq teacher LLM.")
-    p.add_argument("--model", default=DEFAULT_MODEL, help=f"Groq model (default: {DEFAULT_MODEL})")
+    p = argparse.ArgumentParser(description="Label complaints with a teacher LLM.")
+    p.add_argument(
+        "--provider",
+        choices=("groq", "bedrock"),
+        default=DEFAULT_PROVIDER,
+        help=f"Teacher provider (default: {DEFAULT_PROVIDER}).",
+    )
+    p.add_argument(
+        "--model",
+        default=None,
+        help=(
+            "Model identifier. Defaults: groq → "
+            f"{GROQ_DEFAULT_MODEL}; bedrock → {BEDROCK_DEFAULT_MODEL}."
+        ),
+    )
     p.add_argument(
         "--limit",
         type=int,
@@ -398,15 +566,24 @@ def _parse_args() -> argparse.Namespace:
     p.add_argument(
         "--concurrency",
         type=int,
-        default=DEFAULT_CONCURRENCY,
-        help=f"In-flight Groq requests (default: {DEFAULT_CONCURRENCY}).",
+        default=None,
+        help=(
+            "In-flight requests. Defaults: groq → "
+            f"{DEFAULT_CONCURRENCY_BY_PROVIDER['groq']}; bedrock → "
+            f"{DEFAULT_CONCURRENCY_BY_PROVIDER['bedrock']}."
+        ),
     )
     p.add_argument(
         "--output",
         default=str(DEFAULT_OUTPUT),
         help=f"JSONL output path (default: {DEFAULT_OUTPUT}).",
     )
-    return p.parse_args()
+    args = p.parse_args()
+    if args.model is None:
+        args.model = BEDROCK_DEFAULT_MODEL if args.provider == "bedrock" else GROQ_DEFAULT_MODEL
+    if args.concurrency is None:
+        args.concurrency = DEFAULT_CONCURRENCY_BY_PROVIDER[args.provider]
+    return args
 
 
 def main() -> None:
