@@ -93,6 +93,7 @@ services:
       - ./backend:/app    # hot-reload in dev
       - ./scripts:/scripts
       - ./fine_tuning:/fine_tuning
+      - ${HOME}/.aws:/home/appuser/.aws:ro   # boto3 picks up creds from $HOME/.aws
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
       interval: 15s

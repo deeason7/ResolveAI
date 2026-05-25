@@ -47,6 +47,7 @@ dependencies = [
     # Structured LLM output
     "instructor>=1.3,<2.0",
     "openai>=1.50,<2.0",            # OpenAI-compatible client (Groq, Ollama, OpenAI)
+    "boto3>=1.35,<2.0",             # AWS SDK — Bedrock Converse for labeling teacher
 
     # Retry / backoff
     "tenacity>=8.5,<10.0",

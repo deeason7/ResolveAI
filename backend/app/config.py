@@ -40,6 +40,12 @@ class Settings(BaseSettings):
     groq_api_key: str = ""
     openai_api_key: str = ""
 
+    # AWS / Bedrock — boto3 picks up credentials from ~/.aws/ or env vars
+    # automatically; we only need the region here. The two access-key fields
+    # are read-and-forward: pydantic-settings ignores them unless explicitly
+    # set, and boto3 sees them via os.environ regardless.
+    aws_region: str = "us-east-1"
+
     # Auth
     jwt_secret_key: str
     jwt_refresh_secret_key: str

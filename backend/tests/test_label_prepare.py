@@ -4,11 +4,12 @@ Tests for fine_tuning/01_prepare_labels.py helpers.
 The script's filename starts with a digit, so we load it via importlib
 rather than `import`. Tests cover the idempotency contract (skip
 already-labeled), candidate filtering (short narratives, exclusions),
-and persistence (DB row + JSONL line).
+persistence (DB row + JSONL line), and provider-aware token-usage
+parsing across the Groq and Bedrock response shapes.
 
-Groq calls themselves are not mocked here — those are integration
-territory and we verify them with a real `--limit 2` smoke run before
-the long backfill.
+Live teacher calls (Groq, Bedrock Converse) are not mocked here — those
+are integration territory and we verify them with a real `--limit 2 --provider X`
+smoke run before any long backfill.
 """
 
 from __future__ import annotations
@@ -18,6 +19,7 @@ import json
 import sys
 import uuid
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 import pytest_asyncio
@@ -143,9 +145,10 @@ class TestFetchCandidates:
 class TestPersist:
     async def test_writes_db_and_jsonl(self, fresh_db, tmp_path):
         script = _load_script()
+        from sqlmodel import select
+
         from app.models.complaint_label import ComplaintLabel
         from app.schemas.classification import ComplaintClassification, Entity
-        from sqlmodel import select
 
         cid = await _seed_complaint(fresh_db)
         async with fresh_db() as s:
@@ -193,11 +196,12 @@ class TestPersist:
 
     async def test_unique_constraint_blocks_duplicate(self, fresh_db, tmp_path):
         script = _load_script()
-        from app.schemas.classification import ComplaintClassification
         from sqlalchemy.exc import IntegrityError
         from sqlmodel import select
 
-        cid = await _seed_complaint(fresh_db)
+        from app.schemas.classification import ComplaintClassification
+
+        await _seed_complaint(fresh_db)
         async with fresh_db() as s:
             complaint = (
                 await s.execute(
@@ -217,3 +221,116 @@ class TestPersist:
         await script._persist(complaint, "groq:test", classification, {}, jsonl_path)
         with pytest.raises(IntegrityError):
             await script._persist(complaint, "groq:test", classification, {}, jsonl_path)
+
+
+class TestTokenExtraction:
+    """Token-usage field names differ between OpenAI-style and Bedrock responses;
+    `_extract_input_tokens` / `_extract_output_tokens` must normalize both."""
+
+    def test_groq_shape_object_with_usage_attribute(self):
+        script = _load_script()
+        raw = SimpleNamespace(usage=SimpleNamespace(prompt_tokens=512, completion_tokens=48))
+        assert script._extract_input_tokens(raw, "groq") == 512
+        assert script._extract_output_tokens(raw, "groq") == 48
+
+    def test_bedrock_shape_dict_with_camelcase_usage(self):
+        script = _load_script()
+        raw = {"usage": {"inputTokens": 3000, "outputTokens": 240, "totalTokens": 3240}}
+        assert script._extract_input_tokens(raw, "bedrock") == 3000
+        assert script._extract_output_tokens(raw, "bedrock") == 240
+
+    def test_bedrock_shape_object_fallback(self):
+        """instructor may return a Pydantic-ish object instead of a raw dict —
+        the extractor should still find `inputTokens`/`outputTokens`."""
+        script = _load_script()
+        raw = SimpleNamespace(usage=SimpleNamespace(inputTokens=2048, outputTokens=128))
+        assert script._extract_input_tokens(raw, "bedrock") == 2048
+        assert script._extract_output_tokens(raw, "bedrock") == 128
+
+    def test_handles_none_raw(self):
+        script = _load_script()
+        assert script._extract_input_tokens(None, "groq") is None
+        assert script._extract_output_tokens(None, "bedrock") is None
+
+
+class TestRetryPredicate:
+    """`_is_retryable` is the single tenacity predicate covering both providers."""
+
+    def test_openai_rate_limit_error_is_retryable(self):
+        script = _load_script()
+        from openai import RateLimitError
+
+        # RateLimitError constructor signature varies by openai-python version,
+        # so build a minimal stand-in via __new__ to avoid version-coupling.
+        err = RateLimitError.__new__(RateLimitError)
+        BaseException.__init__(err, "rate limit")
+        assert script._is_retryable(err)
+
+    def test_bedrock_throttling_exception_is_retryable(self):
+        script = _load_script()
+        from botocore.exceptions import ClientError
+
+        err = ClientError(
+            error_response={"Error": {"Code": "ThrottlingException", "Message": "Slow down"}},
+            operation_name="Converse",
+        )
+        assert script._is_retryable(err)
+        assert script._is_bedrock_throttle(err)
+
+    def test_bedrock_validation_exception_is_not_retryable(self):
+        """ValidationException means our request was malformed — retry won't help."""
+        script = _load_script()
+        from botocore.exceptions import ClientError
+
+        err = ClientError(
+            error_response={"Error": {"Code": "ValidationException", "Message": "Bad input"}},
+            operation_name="Converse",
+        )
+        assert not script._is_retryable(err)
+        assert not script._is_bedrock_throttle(err)
+
+    def test_plain_value_error_is_not_retryable(self):
+        script = _load_script()
+        assert not script._is_retryable(ValueError("nope"))
+
+
+class TestMakeClient:
+    """`_make_client` returns (client, is_async). Verify the Bedrock path
+    constructs the boto3 client with the configured region and reports sync."""
+
+    def test_bedrock_returns_sync_flag(self, monkeypatch):
+        script = _load_script()
+        import boto3
+
+        from app.config import settings
+
+        captured: dict[str, object] = {}
+
+        def fake_client(service_name: str, region_name: str | None = None, **_kwargs):
+            captured["service_name"] = service_name
+            captured["region_name"] = region_name
+            return SimpleNamespace(_service_name=service_name)
+
+        # Pin a known region so the assertion isn't fragile to host env.
+        monkeypatch.setattr(settings, "aws_region", "us-west-2", raising=False)
+        monkeypatch.setattr(boto3, "client", fake_client)
+
+        # instructor.from_bedrock would try to wrap the fake client; intercept it.
+        import instructor
+
+        def fake_from_bedrock(client, mode=None):
+            return SimpleNamespace(_wrapped=client, _mode=mode)
+
+        monkeypatch.setattr(instructor, "from_bedrock", fake_from_bedrock)
+
+        client, is_async = script._make_client("bedrock")
+        assert is_async is False
+        assert captured == {"service_name": "bedrock-runtime", "region_name": "us-west-2"}
+        # Ensure instructor wrapped our fake client, not a real one.
+        assert client._wrapped._service_name == "bedrock-runtime"
+
+    def test_unknown_provider_exits(self):
+        script = _load_script()
+        with pytest.raises(SystemExit) as exc:
+            script._make_client("anthropic-direct")
+        assert exc.value.code == 2
