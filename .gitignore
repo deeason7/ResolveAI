@@ -61,6 +61,7 @@ fine_tuning/data/labeled/
 fine_tuning/data/formatted/
 fine_tuning/data/audit/
 fine_tuning/models/
+fine_tuning/results/
 *.csv
 *.parquet
 *.pkl
