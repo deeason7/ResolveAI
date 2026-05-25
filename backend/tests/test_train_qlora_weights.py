@@ -152,6 +152,47 @@ class TestDeriveClassWeights:
 # ---------------------------------------------------------------------------
 # _count_sentiments_in_jsonl
 # ---------------------------------------------------------------------------
+class TestFilterSftKwargs:
+    """SFTConfig kwarg compatibility filter across TRL versions."""
+
+    def test_keeps_supported_drops_unsupported(self, caplog):
+        candidate = {"output_dir": "x", "foo": "bar", "report_to": "none"}
+        supported = {"output_dir", "report_to"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_sft_kwargs(candidate, supported)
+        assert out == {"output_dir": "x", "report_to": "none"}
+        assert any("foo" in r.message for r in caplog.records)
+
+    def test_renames_max_seq_length_to_max_length_on_new_trl(self, caplog):
+        # TRL 0.12+ removed max_seq_length in favor of max_length
+        candidate = {"output_dir": "x", "max_seq_length": 2048}
+        supported = {"output_dir", "max_length"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_sft_kwargs(candidate, supported)
+        assert out == {"output_dir": "x", "max_length": 2048}
+        # The rename should NOT show up in the dropped-warning
+        assert not any("max_seq_length" in r.message for r in caplog.records)
+
+    def test_keeps_max_seq_length_on_old_trl(self):
+        # TRL 0.11 and earlier accept max_seq_length directly
+        candidate = {"output_dir": "x", "max_seq_length": 2048}
+        supported = {"output_dir", "max_seq_length"}
+        out = train_qlora._filter_sft_kwargs(candidate, supported)
+        assert out == {"output_dir": "x", "max_seq_length": 2048}
+
+    def test_drops_max_seq_length_when_neither_form_supported(self, caplog):
+        # Hypothetical future TRL that removes both
+        candidate = {"output_dir": "x", "max_seq_length": 2048}
+        supported = {"output_dir"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_sft_kwargs(candidate, supported)
+        assert out == {"output_dir": "x"}
+        assert any("max_seq_length" in r.message for r in caplog.records)
+
+    def test_empty_candidate(self):
+        assert train_qlora._filter_sft_kwargs({}, {"output_dir"}) == {}
+
+
 class TestCountSentimentsInJsonl:
     def test_counts_each_class_correctly(self, tmp_path):
         path = tmp_path / "fake_train.jsonl"
