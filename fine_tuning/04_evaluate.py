@@ -382,6 +382,43 @@ def _load_yaml_config(path: Path) -> dict[str, Any]:
         return yaml.safe_load(fh) or {}
 
 
+def _resolve_adapter_path(adapter_dir: Path) -> Path:
+    """Find the actual adapter directory.
+
+    Depending on TRL/PEFT version and whether training finished cleanly,
+    the final adapter may live at the top of `adapter_dir` or only inside
+    intermediate `checkpoint-N/` subdirectories. Be tolerant: if the
+    top-level doesn't have `adapter_config.json`, fall back to the
+    highest-numbered checkpoint subdir that does.
+    """
+    if (adapter_dir / "adapter_config.json").exists():
+        return adapter_dir
+    candidates: list[tuple[int, Path]] = []
+    for sub in adapter_dir.glob("checkpoint-*"):
+        if not sub.is_dir():
+            continue
+        if not (sub / "adapter_config.json").exists():
+            continue
+        try:
+            step = int(sub.name.rsplit("-", 1)[-1])
+        except ValueError:
+            continue
+        candidates.append((step, sub))
+    if not candidates:
+        raise FileNotFoundError(
+            f"No adapter_config.json found at {adapter_dir} or in any "
+            "checkpoint-N/ subdirectory. Did training complete and save?"
+        )
+    candidates.sort()
+    step, path = candidates[-1]
+    log.info(
+        "no adapter_config.json at top level; using latest checkpoint: %s (step %d)",
+        path.name,
+        step,
+    )
+    return path
+
+
 def _load_model_and_tokenizer(base_model: str, adapter_dir: Path | None):
     """Load the base model (4-bit) and optionally apply the LoRA adapter."""
     import torch
@@ -407,8 +444,9 @@ def _load_model_and_tokenizer(base_model: str, adapter_dir: Path | None):
     if adapter_dir is not None:
         from peft import PeftModel
 
-        log.info("applying LoRA adapter from %s", adapter_dir)
-        model = PeftModel.from_pretrained(model, str(adapter_dir))
+        resolved = _resolve_adapter_path(adapter_dir)
+        log.info("applying LoRA adapter from %s", resolved)
+        model = PeftModel.from_pretrained(model, str(resolved))
     model.eval()
     return model, tokenizer
 
