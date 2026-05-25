@@ -47,9 +47,12 @@ Exit codes
 from __future__ import annotations
 
 import argparse
+import json
 import logging
+import math
 import sys
-from dataclasses import dataclass
+from collections import Counter
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
@@ -94,6 +97,9 @@ class TrainingConfig:
     lora: dict[str, Any]
     training: dict[str, Any]
     data: dict[str, Any]
+    # Optional — defaults to disabled so older configs without this block
+    # keep working unchanged.
+    class_weights: dict[str, Any] = field(default_factory=dict)
 
 
 def _load_config(path: Path) -> TrainingConfig:
@@ -113,6 +119,7 @@ def _load_config(path: Path) -> TrainingConfig:
         lora=raw["lora"],
         training=raw["training"],
         data=raw["data"],
+        class_weights=raw.get("class_weights", {}),
     )
 
 
@@ -213,6 +220,87 @@ def _build_lora_config(cfg: TrainingConfig):
     )
 
 
+# ---------------------------------------------------------------------------
+# Class-imbalance helpers (pure Python — testable without GPU libs)
+# ---------------------------------------------------------------------------
+WEIGHT_COLUMN = "weight"
+
+
+def _extract_sentiment_from_messages(messages: list[dict]) -> str | None:
+    """Pull the `sentiment` field from the assistant turn's JSON content.
+
+    Returns None if the turn isn't found or isn't valid JSON. Used both
+    when computing class weights from the train set and when tagging each
+    example with its own weight.
+    """
+    for msg in messages or []:
+        if msg.get("role") != "assistant":
+            continue
+        content = msg.get("content", "")
+        try:
+            payload = json.loads(content)
+        except (TypeError, ValueError):
+            return None
+        if isinstance(payload, dict):
+            s = payload.get("sentiment")
+            return s if isinstance(s, str) else None
+    return None
+
+
+def _derive_class_weights(
+    class_counts: dict[str, int],
+    method: str,
+    manual_scale: dict[str, float] | None = None,
+) -> dict[str, float]:
+    """Translate class counts into per-class loss multipliers.
+
+    method=sqrt_inverse_freq → weight = sqrt(N / (K * N_class))
+    method=inverse_freq      → weight = N / (K * N_class)
+    method=none              → uniform 1.0
+
+    The manual_scale dict (if provided) multiplies each class's weight at
+    the end, letting you nudge classes without re-deriving from frequencies.
+    """
+    manual_scale = manual_scale or {}
+    if not class_counts:
+        return {}
+    if method == "none":
+        return {k: 1.0 * manual_scale.get(k, 1.0) for k in class_counts}
+    n_total = sum(class_counts.values())
+    k = len(class_counts)
+    weights: dict[str, float] = {}
+    for cls, count in class_counts.items():
+        if count <= 0:
+            weights[cls] = 0.0
+            continue
+        raw = n_total / (k * count)
+        if method == "sqrt_inverse_freq":
+            raw = math.sqrt(raw)
+        elif method != "inverse_freq":
+            log.warning("unknown class_weights.method=%s — falling back to uniform", method)
+            raw = 1.0
+        weights[cls] = raw * manual_scale.get(cls, 1.0)
+    return weights
+
+
+def _count_sentiments_in_jsonl(path: Path) -> dict[str, int]:
+    """Count sentiment classes by reading the training JSONL once with stdlib."""
+    counts: Counter[str] = Counter()
+    with path.open("r", encoding="utf-8") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                rec = json.loads(line)
+            except ValueError:
+                continue
+            sentiment = _extract_sentiment_from_messages(rec.get("messages", []))
+            if sentiment:
+                counts[sentiment] += 1
+    return dict(counts)
+
+
 def _build_sft_config(cfg: TrainingConfig):
     from trl import SFTConfig
 
@@ -267,17 +355,98 @@ def _train(cfg: TrainingConfig, dry_run: bool) -> int:
             return 2
         log.info("DRY RUN: train=%d val=%d", n_train, n_val)
         log.info("sample record (truncated): %s", str(sample)[:300])
+        cw_cfg = cfg.class_weights or {}
+        if cw_cfg.get("enabled"):
+            counts = _count_sentiments_in_jsonl(train_path)
+            weights = _derive_class_weights(
+                counts,
+                cw_cfg.get("method", "sqrt_inverse_freq"),
+                cw_cfg.get("manual_scale", {}) or {},
+            )
+            log.info(
+                "DRY RUN: class_weights enabled (method=%s) counts=%s weights=%s",
+                cw_cfg.get("method"),
+                counts,
+                {k: round(v, 3) for k, v in weights.items()},
+            )
+        else:
+            log.info("DRY RUN: class_weights disabled in config")
         log.info("DRY RUN: model load and training skipped; data path verified.")
         return 0
 
     import torch
     from peft import get_peft_model, prepare_model_for_kbit_training
+    from torch.nn import CrossEntropyLoss
     from transformers import AutoModelForCausalLM, AutoTokenizer
     from trl import SFTTrainer
 
     if not torch.cuda.is_available():
         log.critical("CUDA is not available — QLoRA training requires a GPU.")
         return 2
+
+    # ---------------------------------------------------------------------
+    # WeightedSFTTrainer + collator are nested inside _train so that torch
+    # only loads when we're actually training. Keeps --dry-run and --help
+    # importable on CPU-only environments.
+    # ---------------------------------------------------------------------
+    class WeightedDataCollator:
+        """Wrap the trainer's inner collator and lift our per-example
+        weight column into a batch tensor.
+
+        The default TRL collator only knows about tokenized fields; any
+        extra column (like `weight`) gets dropped. We pop it ourselves,
+        delegate the rest, and re-attach the resulting (B,) tensor.
+        """
+
+        def __init__(self, inner):
+            self.inner = inner
+
+        def __call__(self, features):
+            weights = [float(f.pop(WEIGHT_COLUMN, 1.0)) for f in features]
+            batch = self.inner(features)
+            batch[WEIGHT_COLUMN] = torch.tensor(weights, dtype=torch.float32)
+            return batch
+
+    class WeightedSFTTrainer(SFTTrainer):
+        """SFTTrainer with per-example loss weighting.
+
+        Standard SFT produces one mean-reduced scalar loss per batch. To
+        apply a different weight to each example we have to recompute the
+        per-token CE from logits, mean over valid tokens to get
+        per-example loss, multiply by the per-example weight, then mean.
+        """
+
+        def compute_loss(self, model, inputs, return_outputs=False, **kwargs):
+            weights = inputs.pop(WEIGHT_COLUMN, None)
+            labels = inputs.get("labels")
+            outputs = model(**inputs)
+
+            # If weights weren't threaded through (e.g., eval batches built
+            # without our collator), fall back to vanilla loss.
+            if weights is None or labels is None:
+                loss = outputs.loss
+                return (loss, outputs) if return_outputs else loss
+
+            # Standard causal-LM shift: predict token t+1 from positions
+            # [:-1]; compare against labels [1:].
+            shift_logits = outputs.logits[..., :-1, :].contiguous()
+            shift_labels = labels[..., 1:].contiguous()
+
+            loss_fct = CrossEntropyLoss(reduction="none", ignore_index=-100)
+            flat_loss = loss_fct(
+                shift_logits.view(-1, shift_logits.size(-1)),
+                shift_labels.view(-1),
+            ).view(shift_labels.size())
+
+            # Per-example mean over only the supervised positions (assistant
+            # turn); user/system tokens are -100 in labels and excluded.
+            valid = (shift_labels != -100).float()
+            denom = valid.sum(dim=-1).clamp(min=1.0)
+            per_example = (flat_loss * valid).sum(dim=-1) / denom
+
+            w = weights.to(per_example.device).to(per_example.dtype)
+            loss = (per_example * w).mean()
+            return (loss, outputs) if return_outputs else loss
 
     log.info("loading datasets...")
     ds = _load_datasets(cfg)
@@ -315,15 +484,56 @@ def _train(cfg: TrainingConfig, dry_run: bool) -> int:
     model = get_peft_model(model, lora_config)
     model.print_trainable_parameters()
 
+    # ---------------------------------------------------------------------
+    # Optionally derive + attach per-example class weights.
+    # ---------------------------------------------------------------------
+    cw_cfg = cfg.class_weights or {}
+    weights_enabled = bool(cw_cfg.get("enabled", False))
+    class_weights: dict[str, float] = {}
+    train_ds = ds["train"]
+    eval_ds = ds["validation"]
+    if weights_enabled:
+        method = cw_cfg.get("method", "sqrt_inverse_freq")
+        manual_scale = cw_cfg.get("manual_scale", {}) or {}
+        train_counts: Counter[str] = Counter()
+        for ex in train_ds:
+            s = _extract_sentiment_from_messages(ex.get("messages", []))
+            if s:
+                train_counts[s] += 1
+        class_weights = _derive_class_weights(dict(train_counts), method, manual_scale)
+        log.info(
+            "class weights enabled: method=%s counts=%s weights=%s",
+            method,
+            dict(train_counts),
+            {k: round(v, 3) for k, v in class_weights.items()},
+        )
+
+        def _attach_weight(ex):
+            s = _extract_sentiment_from_messages(ex.get("messages", []))
+            ex[WEIGHT_COLUMN] = float(class_weights.get(s, 1.0))
+            return ex
+
+        train_ds = train_ds.map(_attach_weight)
+        eval_ds = eval_ds.map(_attach_weight)
+    else:
+        log.info("class weights disabled — vanilla SFT loss")
+
     log.info("building SFTTrainer and starting training...")
     sft_config = _build_sft_config(cfg)
-    trainer = SFTTrainer(
+    trainer_cls = WeightedSFTTrainer if weights_enabled else SFTTrainer
+    trainer = trainer_cls(
         model=model,
         args=sft_config,
-        train_dataset=ds["train"],
-        eval_dataset=ds["validation"],
+        train_dataset=train_ds,
+        eval_dataset=eval_ds,
         tokenizer=tokenizer,
     )
+    if weights_enabled:
+        # Replace the trainer's data collator with our wrapper so the
+        # `weight` column survives batching as a tensor instead of being
+        # silently dropped.
+        trainer.data_collator = WeightedDataCollator(trainer.data_collator)
+
     train_result = trainer.train()
     log.info("training metrics: %s", train_result.metrics)
 
