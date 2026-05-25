@@ -301,38 +301,68 @@ def _count_sentiments_in_jsonl(path: Path) -> dict[str, int]:
     return dict(counts)
 
 
+def _filter_sft_kwargs(candidate: dict, accepted_params: set[str]) -> dict:
+    """Keep only kwargs this TRL version's SFTConfig accepts.
+
+    TRL renames things between minor versions. Most notably 0.12+ removed
+    ``max_seq_length`` from SFTConfig in favor of ``max_length`` (and may
+    remove it entirely in a later version). Rather than pin TRL or guess,
+    we introspect ``SFTConfig.__init__`` and:
+      * drop kwargs not in the signature (with a warning, so a silently
+        ignored config change is visible in the log),
+      * rename ``max_seq_length`` to ``max_length`` if the former is
+        rejected and the latter is accepted.
+    """
+    out = {k: v for k, v in candidate.items() if k in accepted_params}
+    dropped = [k for k in candidate if k not in accepted_params]
+    if "max_seq_length" in dropped and "max_length" in accepted_params:
+        out["max_length"] = candidate["max_seq_length"]
+        dropped.remove("max_seq_length")
+    if dropped:
+        log.warning(
+            "dropping SFTConfig kwargs not accepted by this TRL version: %s",
+            dropped,
+        )
+    return out
+
+
 def _build_sft_config(cfg: TrainingConfig):
+    import inspect
+
     from trl import SFTConfig
 
     t = cfg.training
-    return SFTConfig(
-        output_dir=t["output_dir"],
-        num_train_epochs=t["num_train_epochs"],
-        per_device_train_batch_size=t["per_device_train_batch_size"],
-        per_device_eval_batch_size=t.get("per_device_eval_batch_size", 4),
-        gradient_accumulation_steps=t["gradient_accumulation_steps"],
-        learning_rate=t["learning_rate"],
-        lr_scheduler_type=t["lr_scheduler_type"],
-        warmup_ratio=t["warmup_ratio"],
-        weight_decay=t["weight_decay"],
-        optim=t["optim"],
-        fp16=t["fp16"],
-        bf16=t["bf16"],
-        max_grad_norm=t["max_grad_norm"],
-        max_seq_length=cfg.model["max_seq_length"],
-        gradient_checkpointing=t["gradient_checkpointing"],
-        logging_steps=t["logging_steps"],
-        eval_strategy=t["eval_strategy"],
-        eval_steps=t["eval_steps"],
-        save_strategy=t["save_strategy"],
-        save_steps=t["save_steps"],
-        save_total_limit=t["save_total_limit"],
-        load_best_model_at_end=t["load_best_model_at_end"],
-        metric_for_best_model=t["metric_for_best_model"],
-        greater_is_better=t["greater_is_better"],
-        report_to=t["report_to"],
-        seed=t["seed"],
-    )
+    candidate = {
+        "output_dir": t["output_dir"],
+        "num_train_epochs": t["num_train_epochs"],
+        "per_device_train_batch_size": t["per_device_train_batch_size"],
+        "per_device_eval_batch_size": t.get("per_device_eval_batch_size", 4),
+        "gradient_accumulation_steps": t["gradient_accumulation_steps"],
+        "learning_rate": t["learning_rate"],
+        "lr_scheduler_type": t["lr_scheduler_type"],
+        "warmup_ratio": t["warmup_ratio"],
+        "weight_decay": t["weight_decay"],
+        "optim": t["optim"],
+        "fp16": t["fp16"],
+        "bf16": t["bf16"],
+        "max_grad_norm": t["max_grad_norm"],
+        "max_seq_length": cfg.model["max_seq_length"],
+        "gradient_checkpointing": t["gradient_checkpointing"],
+        "logging_steps": t["logging_steps"],
+        "eval_strategy": t["eval_strategy"],
+        "eval_steps": t["eval_steps"],
+        "save_strategy": t["save_strategy"],
+        "save_steps": t["save_steps"],
+        "save_total_limit": t["save_total_limit"],
+        "load_best_model_at_end": t["load_best_model_at_end"],
+        "metric_for_best_model": t["metric_for_best_model"],
+        "greater_is_better": t["greater_is_better"],
+        "report_to": t["report_to"],
+        "seed": t["seed"],
+    }
+    accepted_params = set(inspect.signature(SFTConfig.__init__).parameters.keys())
+    kwargs = _filter_sft_kwargs(candidate, accepted_params)
+    return SFTConfig(**kwargs)
 
 
 # ---------------------------------------------------------------------------
