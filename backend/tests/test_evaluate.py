@@ -275,6 +275,56 @@ class TestLoadTestExamples:
         assert len(out) == 1
 
 # Spearman behaviour vs known reference values
+class TestResolveAdapterPath:
+    """Adapter path may be at the top level or nested in checkpoint-N/."""
+
+    def test_uses_top_level_when_adapter_config_present(self, tmp_path):
+        (tmp_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+        assert evaluate._resolve_adapter_path(tmp_path) == tmp_path
+
+    def test_falls_back_to_latest_checkpoint(self, tmp_path):
+        # Three checkpoint dirs with adapter_config.json; eval should pick the highest
+        for step in (100, 200, 300):
+            sub = tmp_path / f"checkpoint-{step}"
+            sub.mkdir()
+            (sub / "adapter_config.json").write_text("{}", encoding="utf-8")
+        out = evaluate._resolve_adapter_path(tmp_path)
+        assert out.name == "checkpoint-300"
+
+    def test_skips_checkpoint_without_adapter_config(self, tmp_path):
+        # checkpoint-200 lacks adapter_config; resolver must skip it
+        ok = tmp_path / "checkpoint-100"
+        ok.mkdir()
+        (ok / "adapter_config.json").write_text("{}", encoding="utf-8")
+        bad = tmp_path / "checkpoint-200"
+        bad.mkdir()
+        out = evaluate._resolve_adapter_path(tmp_path)
+        assert out.name == "checkpoint-100"
+
+    def test_top_level_wins_over_checkpoints(self, tmp_path):
+        # When top-level adapter exists, use it even if checkpoint-N is present
+        (tmp_path / "adapter_config.json").write_text("{}", encoding="utf-8")
+        sub = tmp_path / "checkpoint-500"
+        sub.mkdir()
+        (sub / "adapter_config.json").write_text("{}", encoding="utf-8")
+        assert evaluate._resolve_adapter_path(tmp_path) == tmp_path
+
+    def test_skips_non_numeric_checkpoint_suffix(self, tmp_path):
+        # Defensive — some pipelines emit checkpoint-best or checkpoint-final
+        weird = tmp_path / "checkpoint-best"
+        weird.mkdir()
+        (weird / "adapter_config.json").write_text("{}", encoding="utf-8")
+        numeric = tmp_path / "checkpoint-200"
+        numeric.mkdir()
+        (numeric / "adapter_config.json").write_text("{}", encoding="utf-8")
+        out = evaluate._resolve_adapter_path(tmp_path)
+        assert out.name == "checkpoint-200"
+
+    def test_raises_when_nothing_found(self, tmp_path):
+        with pytest.raises(FileNotFoundError, match="No adapter_config.json"):
+            evaluate._resolve_adapter_path(tmp_path)
+
+
 class TestSpearmanReference:
     def test_classic_textbook_example(self):
         # Simple example with a known Spearman of about 0.886
