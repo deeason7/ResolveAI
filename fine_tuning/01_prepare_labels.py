@@ -69,11 +69,45 @@ logging.basicConfig(
 )
 log = logging.getLogger("prepare_labels")
 
+# Keep the run log readable — SQLAlchemy's engine echo is meant for app
+# debugging, not a multi-day batch job.
+logging.getLogger("sqlalchemy.engine").setLevel(logging.WARNING)
+logging.getLogger("openai").setLevel(logging.WARNING)
+logging.getLogger("httpx").setLevel(logging.WARNING)
+
 DEFAULT_MODEL = "llama-3.3-70b-versatile"
 DEFAULT_CONCURRENCY = 3  # well under Groq's 30 rpm to leave headroom for retries
 DEFAULT_LIMIT = 10_000
 GROQ_BASE_URL = "https://api.groq.com/openai/v1"
 MIN_NARRATIVE_CHARS = 50
+# Groq surfaces two distinct 429s: per-minute (recoverable via backoff) and
+# per-day (won't recover today — exit and let cron retry tomorrow).
+DAILY_CAP_PHRASES = ("tokens per day", "(tpd)", "rpd")
+CHUNK_MULTIPLIER = 4  # micro-batch size = concurrency × this; controls how
+#                       often we check the cap flag between gather calls
+
+
+class DailyCapReached(Exception):
+    """Raised when Groq returns a 'tokens per day' 429 — don't retry today."""
+
+
+def _is_daily_cap_error(err: BaseException) -> bool:
+    """Walk the cause/context chain looking for the TPD signature.
+
+    instructor and the openai client both wrap the original RateLimitError
+    into their own exception types, so an `isinstance(err, RateLimitError)`
+    check fires on a fraction of cases. The TPD wording is invariant
+    across all wrappers — that's what we key on.
+    """
+    seen: set[int] = set()
+    cur: BaseException | None = err
+    while cur is not None and id(cur) not in seen:
+        seen.add(id(cur))
+        msg = str(cur).lower()
+        if any(phrase in msg for phrase in DAILY_CAP_PHRASES):
+            return True
+        cur = cur.__cause__ or cur.__context__
+    return False
 
 RUBRIC_PATH = Path(__file__).parent / "prompts" / "labeling_prompt.md"
 DEFAULT_OUTPUT = Path(__file__).parent / "data" / "labeled" / "gold_labels.jsonl"
@@ -155,18 +189,28 @@ async def _label_one(
     rubric: str,
     complaint: Complaint,
 ) -> tuple[ComplaintClassification, dict]:
-    """Single Groq call. Returns the parsed result + operational metadata."""
+    """Single Groq call. Returns the parsed result + operational metadata.
+
+    Raises DailyCapReached (NOT RateLimitError) when the 429 is the
+    tokens-per-day variant, so tenacity stops retrying immediately and
+    the orchestrator can short-circuit the remaining work.
+    """
     started = time.monotonic()
-    result, raw = await client.chat.completions.create_with_completion(
-        model=model,
-        response_model=ComplaintClassification,
-        max_retries=2,  # instructor's own JSON-repair loop, separate from tenacity
-        messages=[
-            {"role": "system", "content": rubric},
-            {"role": "user", "content": _build_user_prompt(complaint)},
-        ],
-        temperature=0.0,
-    )
+    try:
+        result, raw = await client.chat.completions.create_with_completion(
+            model=model,
+            response_model=ComplaintClassification,
+            max_retries=2,  # instructor's own JSON-repair loop, separate from tenacity
+            messages=[
+                {"role": "system", "content": rubric},
+                {"role": "user", "content": _build_user_prompt(complaint)},
+            ],
+            temperature=0.0,
+        )
+    except Exception as e:  # noqa: BLE001 — type-agnostic TPD detection
+        if _is_daily_cap_error(e):
+            raise DailyCapReached(str(e)) from e
+        raise
     latency_ms = int((time.monotonic() - started) * 1000)
     usage = getattr(raw, "usage", None)
     meta = {
@@ -259,71 +303,84 @@ async def _run(args: argparse.Namespace) -> int:
 
     client = _make_client()
     sem = asyncio.Semaphore(args.concurrency)
-    success = 0
-    rate_limit_failures = 0
-    other_failures = 0
-    tokens_in = 0
-    tokens_out = 0
+    cap_event = asyncio.Event()
+    counters = {"ok": 0, "rate_limited": 0, "other": 0, "tokens_in": 0, "tokens_out": 0}
     started = time.monotonic()
 
     async def process(c: Complaint) -> None:
-        nonlocal success, rate_limit_failures, other_failures, tokens_in, tokens_out
+        if cap_event.is_set():
+            return
         async with sem:
+            if cap_event.is_set():
+                return
             try:
                 result, meta = await _label_one(client, args.model, rubric, c)
-            except RateLimitError as e:
-                rate_limit_failures += 1
-                log.warning("rate-limit (after retries) on %s: %s", c.id, e)
+            except DailyCapReached as e:
+                cap_event.set()
+                log.warning("daily token cap reached on %s: %s", c.id, str(e)[:200])
                 return
-            except Exception as e:  # noqa: BLE001 — log + continue
-                other_failures += 1
-                log.exception("labeling failed for %s: %s", c.id, e)
+            except Exception as e:  # noqa: BLE001 — single funnel, decide by content
+                if _is_daily_cap_error(e):
+                    cap_event.set()
+                    log.warning("daily token cap reached on %s (wrapped)", c.id)
+                    return
+                if isinstance(e, RateLimitError):
+                    counters["rate_limited"] += 1
+                    log.warning("rate-limit on %s: %s", c.id, str(e)[:200])
+                    return
+                counters["other"] += 1
+                log.warning("labeling failed for %s: %s", c.id, str(e)[:200])
                 return
             try:
                 await _persist(c, label_source, result, meta, output_path)
             except Exception as e:  # noqa: BLE001
-                other_failures += 1
+                counters["other"] += 1
                 log.exception("persistence failed for %s: %s", c.id, e)
                 return
-            success += 1
-            tokens_in += meta.get("input_tokens") or 0
-            tokens_out += meta.get("output_tokens") or 0
-            if success % 10 == 0 or success == 1:
+            counters["ok"] += 1
+            counters["tokens_in"] += meta.get("input_tokens") or 0
+            counters["tokens_out"] += meta.get("output_tokens") or 0
+            if counters["ok"] % 10 == 0 or counters["ok"] == 1:
                 elapsed = time.monotonic() - started
-                rate = success / elapsed if elapsed else 0
+                rate = counters["ok"] / elapsed if elapsed else 0
                 log.info(
                     "progress: ok=%d rate_limited=%d other_errors=%d "
                     "tokens_in=%d tokens_out=%d elapsed=%.1fs rate=%.1f/s",
-                    success,
-                    rate_limit_failures,
-                    other_failures,
-                    tokens_in,
-                    tokens_out,
+                    counters["ok"],
+                    counters["rate_limited"],
+                    counters["other"],
+                    counters["tokens_in"],
+                    counters["tokens_out"],
                     elapsed,
                     rate,
                 )
 
-    await asyncio.gather(*(process(c) for c in candidates))
+    # Process in micro-batches so the cap flag is checked frequently,
+    # not just after all 10K tasks have either succeeded or burned through
+    # their retry budgets.
+    chunk_size = args.concurrency * CHUNK_MULTIPLIER
+    for i in range(0, len(candidates), chunk_size):
+        if cap_event.is_set():
+            break
+        chunk = candidates[i : i + chunk_size]
+        await asyncio.gather(*(process(c) for c in chunk))
 
     elapsed = time.monotonic() - started
     log.info(
         "DONE: ok=%d rate_limited=%d other_errors=%d "
         "tokens_in=%d tokens_out=%d in %.1fs",
-        success,
-        rate_limit_failures,
-        other_failures,
-        tokens_in,
-        tokens_out,
+        counters["ok"],
+        counters["rate_limited"],
+        counters["other"],
+        counters["tokens_in"],
+        counters["tokens_out"],
         elapsed,
     )
 
-    # If a meaningful fraction of attempts hit the cap, signal cron-style
-    # exit so a wrapper can decide whether to back off and retry tomorrow.
-    if rate_limit_failures > 0 and rate_limit_failures >= len(candidates) // 2:
+    if cap_event.is_set():
         log.warning(
-            "rate-limit failures dominated (%d/%d) — likely Groq daily cap reached",
-            rate_limit_failures,
-            len(candidates),
+            "exited early due to Groq daily token cap — re-run after the "
+            "cap resets (Groq surfaces a UTC reset window in the 429 message)"
         )
         return 1
     return 0
