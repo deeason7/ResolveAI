@@ -141,8 +141,15 @@ training:
 
   seed: 42
 
-  # SFTTrainer needs to know which field in the messages list holds the
-  # output for loss-masking. The default works for HF "messages" format.
+  # Mask system + user tokens to -100 in labels so the loss only flows
+  # through the assistant JSON output. Without this, TRL supervises the
+  # entire chat sequence — the model burns capacity predicting the user's
+  # complaint narrative, per-token CE is dominated by high-entropy user
+  # text, and the class_weights signal gets diluted across thousands of
+  # off-target tokens. TRL added this flag in 0.13; older versions silently
+  # drop it via _filter_sft_kwargs (and would need a manual completion-only
+  # data collator as a fallback).
+  assistant_only_loss: true
 
 # ---------------------------------------------------------------------------
 # Class-imbalance mitigation

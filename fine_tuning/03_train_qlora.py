@@ -369,6 +369,11 @@ def _build_sft_config(cfg: TrainingConfig):
         "bf16": t["bf16"],
         "max_grad_norm": t["max_grad_norm"],
         "max_seq_length": cfg.model["max_seq_length"],
+        # Mask user/system tokens to -100 so loss only flows through the
+        # assistant JSON. Default False matches TRL's own default; our
+        # YAML sets it true. The _filter_sft_kwargs shim drops it on TRL
+        # versions that don't accept it (pre-0.13).
+        "assistant_only_loss": t.get("assistant_only_loss", False),
         "gradient_checkpointing": t["gradient_checkpointing"],
         "logging_steps": t["logging_steps"],
         "eval_strategy": t["eval_strategy"],
