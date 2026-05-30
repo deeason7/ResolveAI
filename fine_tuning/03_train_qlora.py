@@ -301,6 +301,28 @@ def _count_sentiments_in_jsonl(path: Path) -> dict[str, int]:
     return dict(counts)
 
 
+def _filter_trainer_kwargs(candidate: dict, accepted_params: set[str]) -> dict:
+    """Keep only kwargs this TRL version's SFTTrainer accepts.
+
+    Mirrors :func:`_filter_sft_kwargs` for the trainer-class signature.
+    The notable rename here is ``tokenizer`` → ``processing_class``
+    (TRL 0.12+ followed the transformers-wide ``processing_class``
+    convention so the same Trainer class can hold tokenizers,
+    feature extractors, or processors for multimodal models).
+    """
+    out = {k: v for k, v in candidate.items() if k in accepted_params}
+    dropped = [k for k in candidate if k not in accepted_params]
+    if "tokenizer" in dropped and "processing_class" in accepted_params:
+        out["processing_class"] = candidate["tokenizer"]
+        dropped.remove("tokenizer")
+    if dropped:
+        log.warning(
+            "dropping SFTTrainer kwargs not accepted by this TRL version: %s",
+            dropped,
+        )
+    return out
+
+
 def _filter_sft_kwargs(candidate: dict, accepted_params: set[str]) -> dict:
     """Keep only kwargs this TRL version's SFTConfig accepts.
 
@@ -347,6 +369,11 @@ def _build_sft_config(cfg: TrainingConfig):
         "bf16": t["bf16"],
         "max_grad_norm": t["max_grad_norm"],
         "max_seq_length": cfg.model["max_seq_length"],
+        # Mask user/system tokens to -100 so loss only flows through the
+        # assistant JSON. Default False matches TRL's own default; our
+        # YAML sets it true. The _filter_sft_kwargs shim drops it on TRL
+        # versions that don't accept it (pre-0.13).
+        "assistant_only_loss": t.get("assistant_only_loss", False),
         "gradient_checkpointing": t["gradient_checkpointing"],
         "logging_steps": t["logging_steps"],
         "eval_strategy": t["eval_strategy"],
@@ -551,13 +578,20 @@ def _train(cfg: TrainingConfig, dry_run: bool) -> int:
     log.info("building SFTTrainer and starting training...")
     sft_config = _build_sft_config(cfg)
     trainer_cls = WeightedSFTTrainer if weights_enabled else SFTTrainer
-    trainer = trainer_cls(
-        model=model,
-        args=sft_config,
-        train_dataset=train_ds,
-        eval_dataset=eval_ds,
-        tokenizer=tokenizer,
-    )
+    # Inline import — `inspect` is stdlib but we keep imports adjacent to
+    # the introspection site so the rename-shim story is obvious.
+    import inspect
+
+    trainer_candidate = {
+        "model": model,
+        "args": sft_config,
+        "train_dataset": train_ds,
+        "eval_dataset": eval_ds,
+        "tokenizer": tokenizer,
+    }
+    trainer_accepted = set(inspect.signature(trainer_cls.__init__).parameters.keys())
+    trainer_kwargs = _filter_trainer_kwargs(trainer_candidate, trainer_accepted)
+    trainer = trainer_cls(**trainer_kwargs)
     if weights_enabled:
         # Replace the trainer's data collator with our wrapper so the
         # `weight` column survives batching as a tensor instead of being

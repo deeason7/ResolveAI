@@ -193,6 +193,42 @@ class TestFilterSftKwargs:
         assert train_qlora._filter_sft_kwargs({}, {"output_dir"}) == {}
 
 
+class TestFilterTrainerKwargs:
+    """SFTTrainer kwarg compatibility filter across TRL versions."""
+
+    def test_renames_tokenizer_to_processing_class_on_new_trl(self, caplog):
+        # TRL 0.12+ renamed tokenizer → processing_class
+        candidate = {"model": "m", "tokenizer": "tok"}
+        supported = {"model", "processing_class"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_trainer_kwargs(candidate, supported)
+        assert out == {"model": "m", "processing_class": "tok"}
+        # Renamed kwarg shouldn't appear in any dropped-warning
+        assert not any("tokenizer" in r.message for r in caplog.records)
+
+    def test_keeps_tokenizer_on_old_trl(self):
+        candidate = {"model": "m", "tokenizer": "tok"}
+        supported = {"model", "tokenizer"}
+        out = train_qlora._filter_trainer_kwargs(candidate, supported)
+        assert out == {"model": "m", "tokenizer": "tok"}
+
+    def test_drops_tokenizer_when_neither_form_supported(self, caplog):
+        candidate = {"model": "m", "tokenizer": "tok"}
+        supported = {"model"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_trainer_kwargs(candidate, supported)
+        assert out == {"model": "m"}
+        assert any("tokenizer" in r.message for r in caplog.records)
+
+    def test_drops_other_unknown_kwargs(self, caplog):
+        candidate = {"model": "m", "foo": "bar"}
+        supported = {"model"}
+        with caplog.at_level("WARNING"):
+            out = train_qlora._filter_trainer_kwargs(candidate, supported)
+        assert out == {"model": "m"}
+        assert any("foo" in r.message for r in caplog.records)
+
+
 class TestCountSentimentsInJsonl:
     def test_counts_each_class_correctly(self, tmp_path):
         path = tmp_path / "fake_train.jsonl"
