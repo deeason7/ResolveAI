@@ -96,6 +96,13 @@ class TestCompanyProfile:
         _, kwargs = driver.execute_query.call_args
         assert kwargs["company_name"] == "ACME"
 
+    async def test_product_breakdown_query_is_ordered(self, store, driver):
+        # collect() is unordered; the query must sort by edge count so the
+        # caller's product_breakdown leads with the dominant product.
+        await store.get_company_profile("ACME")
+        query = driver.execute_query.call_args[0][0]
+        assert "ORDER BY h.count" in query
+
 
 # ---------------- get_regulations ----------------
 
@@ -124,6 +131,9 @@ class TestRegulations:
         await store.get_regulations("Mortgage", "Loan servicing")
         query, kwargs = driver.execute_query.call_args[0][0], driver.execute_query.call_args[1]
         assert "HAS_ISSUE" in query and "GOVERNED_BY" in query
+        # product-context guard: shared Issue nodes would otherwise leak in regs
+        # that only apply to a different product.
+        assert "APPLIES_TO" in query
         assert kwargs["product"] == "Mortgage"
         assert kwargs["issue"] == "Loan servicing"
 

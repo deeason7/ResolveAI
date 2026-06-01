@@ -68,6 +68,7 @@ class GraphStore:
             OPTIONAL MATCH (c)-[:VIOLATED]->(reg:Regulation)
             WITH c, collect(DISTINCT reg.title) AS violations
             OPTIONAL MATCH (c)-[h:HAS_COMPLAINTS_ABOUT]->(p:Product)
+            WITH c, violations, p, h ORDER BY h.count DESC
             RETURN c.name AS name,
                    c.total_complaints AS total_complaints,
                    c.risk_score AS risk_score,
@@ -99,11 +100,18 @@ class GraphStore:
         With an issue we walk Product→Issue→Regulation; without one we fall back
         to the direct Regulation→Product APPLIES_TO edge so the caller still gets
         the product-level regulatory context.
+
+        Issue nodes are shared across products (the CFPB taxonomy reuses issue
+        names), so the transitive GOVERNED_BY edge alone would leak in
+        regulations that govern the issue under a *different* product. The
+        `WHERE (r)-[:APPLIES_TO]->(p)` guard re-imposes the queried product's
+        context so only regulations applicable to THIS product come back.
         """
         if issue:
             query = """
                 MATCH (p:Product {name: $product})-[:HAS_ISSUE]->
                       (i:Issue {name: $issue})-[:GOVERNED_BY]->(r:Regulation)
+                WHERE (r)-[:APPLIES_TO]->(p)
                 RETURN DISTINCT r{.id, .title, .cfr_reference, .summary,
                                   .key_provisions} AS regulation
                 ORDER BY regulation.id
