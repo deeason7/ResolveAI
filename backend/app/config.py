@@ -23,6 +23,7 @@ class Settings(BaseSettings):
 
     # Redis
     redis_url: str
+    classification_queue: str = "classification:queue"
 
     # Qdrant
     qdrant_host: str = "qdrant"
@@ -33,12 +34,19 @@ class Settings(BaseSettings):
     neo4j_user: str = "neo4j"
     neo4j_password: str
 
-    # Ollama
+    # Ollama (primary classifier — fine-tuned Qwen2.5-3B served locally)
     ollama_base_url: str = "http://ollama:11434"
+    ollama_model: str = "resolveai-sentiment"
 
-    # Cloud LLM fallbacks
+    # Cloud LLM fallbacks (OpenAI-compatible)
     groq_api_key: str = ""
+    groq_base_url: str = "https://api.groq.com/openai/v1"
+    groq_model: str = "llama-3.3-70b-versatile"
     openai_api_key: str = ""
+
+    # LLM client behavior
+    llm_timeout_s: float = 30.0
+    classification_max_retries: int = 2
 
     # AWS / Bedrock — boto3 picks up credentials from ~/.aws/ or env vars
     # automatically; we only need the region here. The two access-key fields
