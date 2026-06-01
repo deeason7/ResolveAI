@@ -89,10 +89,13 @@ services:
         condition: service_healthy
       qdrant:
         condition: service_healthy
+      neo4j:
+        condition: service_healthy
     volumes:
       - ./backend:/app    # hot-reload in dev
       - ./scripts:/scripts
       - ./fine_tuning:/fine_tuning
+      - ./graph_seed:/graph_seed
       - ${HOME}/.aws:/home/appuser/.aws:ro   # boto3 picks up creds from $HOME/.aws
     healthcheck:
       test: ["CMD-SHELL", "curl -sf http://localhost:8000/api/v1/health || exit 1"]
