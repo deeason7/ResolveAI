@@ -1,0 +1,169 @@
+[
+  {
+    "id": "FCRA",
+    "title": "Fair Credit Reporting Act",
+    "cfr_reference": "15 U.S.C. § 1681",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022)",
+    "summary": "Governs the accuracy, fairness, and privacy of information in consumer credit reports. Gives consumers the right to access their files, dispute inaccurate items, and be notified when reports are used against them.",
+    "applies_to": ["Credit reporting", "Debt collection"],
+    "key_provisions": [
+      "Consumers may dispute inaccurate information; reporting agencies must investigate within 30 days",
+      "One free credit report per year from each nationwide agency",
+      "Adverse action notice required when a report is used to deny credit, employment, or insurance",
+      "Permissible-purpose limits on who may pull a report"
+    ]
+  },
+  {
+    "id": "TILA",
+    "title": "Truth in Lending Act",
+    "cfr_reference": "15 U.S.C. § 1601",
+    "implementing_regulation": "Regulation Z (12 CFR Part 1026)",
+    "summary": "Requires clear, uniform disclosure of the cost of credit so consumers can compare terms. Standardizes how the annual percentage rate and finance charges are presented.",
+    "applies_to": ["Mortgage", "Credit card", "Vehicle loan", "Personal loan", "Student loan"],
+    "key_provisions": [
+      "APR and total finance charge must be disclosed before consummation",
+      "Right of rescission within 3 business days on certain home-secured loans",
+      "Periodic statement and billing-error resolution requirements",
+      "Ability-to-repay determination for mortgage originations"
+    ]
+  },
+  {
+    "id": "FDCPA",
+    "title": "Fair Debt Collection Practices Act",
+    "cfr_reference": "15 U.S.C. § 1692",
+    "implementing_regulation": "Regulation F (12 CFR Part 1006)",
+    "summary": "Prohibits abusive, deceptive, and unfair practices by third-party debt collectors and sets rules for how and when they may contact consumers.",
+    "applies_to": ["Debt collection"],
+    "key_provisions": [
+      "Validation notice required within 5 days of initial communication",
+      "Consumer may demand verification of the debt and dispute it",
+      "Consumer may require the collector to cease communication",
+      "Bans harassment, false representations, and contact at inconvenient times"
+    ]
+  },
+  {
+    "id": "ECOA",
+    "title": "Equal Credit Opportunity Act",
+    "cfr_reference": "15 U.S.C. § 1691",
+    "implementing_regulation": "Regulation B (12 CFR Part 1002)",
+    "summary": "Prohibits discrimination in any aspect of a credit transaction on the basis of race, color, religion, national origin, sex, marital status, age, or receipt of public assistance.",
+    "applies_to": ["Mortgage", "Credit card", "Vehicle loan", "Personal loan", "Student loan"],
+    "key_provisions": [
+      "Adverse action notice with specific reasons required within 30 days",
+      "Prohibits discouraging applicants on a prohibited basis",
+      "Spousal-signature and income-source restrictions",
+      "Record retention of applications for 25 months"
+    ]
+  },
+  {
+    "id": "RESPA",
+    "title": "Real Estate Settlement Procedures Act",
+    "cfr_reference": "12 U.S.C. § 2601",
+    "implementing_regulation": "Regulation X (12 CFR Part 1024)",
+    "summary": "Governs the mortgage settlement process and servicing. Aims to eliminate kickbacks and ensure borrowers receive timely disclosures of settlement costs and servicing practices.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Loan Estimate and Closing Disclosure timing requirements",
+      "Prohibition on kickbacks and unearned fees for referrals",
+      "Servicer must acknowledge and resolve qualified written requests / error notices",
+      "Escrow account limits and annual analysis"
+    ]
+  },
+  {
+    "id": "EFTA",
+    "title": "Electronic Fund Transfer Act",
+    "cfr_reference": "15 U.S.C. § 1693",
+    "implementing_regulation": "Regulation E (12 CFR Part 1005)",
+    "summary": "Establishes the rights and liabilities of consumers using electronic fund transfers — debit cards, ATMs, ACH, and prepaid accounts — including error-resolution and limited liability for unauthorized transfers.",
+    "applies_to": ["Checking or savings account", "Prepaid card", "Money transfer"],
+    "key_provisions": [
+      "Error-resolution investigation within 10 business days (45 with provisional credit)",
+      "Tiered liability caps for unauthorized transfers reported promptly",
+      "Disclosure of terms before the first EFT",
+      "Receipts and periodic statements for electronic transfers"
+    ]
+  },
+  {
+    "id": "GLBA",
+    "title": "Gramm-Leach-Bliley Act",
+    "cfr_reference": "15 U.S.C. § 6801",
+    "implementing_regulation": "Regulation P (12 CFR Part 1016)",
+    "summary": "Requires financial institutions to explain their information-sharing practices and to safeguard sensitive consumer data.",
+    "applies_to": ["Checking or savings account", "Mortgage", "Credit card", "Credit reporting"],
+    "key_provisions": [
+      "Annual privacy notice describing data-sharing practices",
+      "Right to opt out of sharing with non-affiliated third parties",
+      "Safeguards Rule requiring an information-security program",
+      "Pretexting protections against obtaining information under false pretenses"
+    ]
+  },
+  {
+    "id": "UDAAP",
+    "title": "Dodd-Frank UDAAP Authority",
+    "cfr_reference": "12 U.S.C. § 5531, § 5536",
+    "implementing_regulation": "Consumer Financial Protection Act (Title X of Dodd-Frank)",
+    "summary": "Prohibits unfair, deceptive, or abusive acts or practices by providers of consumer financial products and services. The CFPB's broadest enforcement hook, applicable across product lines.",
+    "applies_to": ["Mortgage", "Credit card", "Debt collection", "Credit reporting", "Checking or savings account", "Vehicle loan", "Personal loan", "Student loan", "Money transfer", "Prepaid card"],
+    "key_provisions": [
+      "Unfair: causes substantial injury not reasonably avoidable and not outweighed by benefits",
+      "Deceptive: misleads a reasonable consumer to their detriment",
+      "Abusive: materially interferes with understanding or exploits a lack of understanding",
+      "Applies regardless of whether a product-specific rule was also violated"
+    ]
+  },
+  {
+    "id": "SCRA",
+    "title": "Servicemembers Civil Relief Act",
+    "cfr_reference": "50 U.S.C. § 3901 et seq.",
+    "implementing_regulation": "Enforced by DOJ and CFPB",
+    "summary": "Provides financial and legal protections to active-duty servicemembers, including interest-rate caps and foreclosure / repossession protections.",
+    "applies_to": ["Mortgage", "Vehicle loan", "Credit card", "Personal loan", "Student loan"],
+    "key_provisions": [
+      "6% interest-rate cap on pre-service obligations during active duty",
+      "Protection against default judgments",
+      "Foreclosure protections without a court order",
+      "Right to terminate certain leases on deployment"
+    ]
+  },
+  {
+    "id": "HMDA",
+    "title": "Home Mortgage Disclosure Act",
+    "cfr_reference": "12 U.S.C. § 2801",
+    "implementing_regulation": "Regulation C (12 CFR Part 1003)",
+    "summary": "Requires many lenders to collect and publicly report mortgage application data, used to detect discriminatory lending patterns and assess whether institutions serve community housing needs.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Collection of loan-level application data (LAR)",
+      "Public disclosure of mortgage lending data",
+      "Used by regulators to screen for redlining and fair-lending issues"
+    ]
+  },
+  {
+    "id": "TISA",
+    "title": "Truth in Savings Act",
+    "cfr_reference": "12 U.S.C. § 4301",
+    "implementing_regulation": "Regulation DD (12 CFR Part 1030)",
+    "summary": "Requires depository institutions to disclose fees, the annual percentage yield, interest rates, and other terms for deposit accounts so consumers can compare savings products.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "Uniform APY disclosure for comparison shopping",
+      "Fee schedule disclosure before account opening",
+      "Advance notice of adverse changes to account terms",
+      "Rules on how balances are calculated for interest"
+    ]
+  },
+  {
+    "id": "FCBA",
+    "title": "Fair Credit Billing Act",
+    "cfr_reference": "15 U.S.C. § 1666",
+    "implementing_regulation": "Regulation Z (12 CFR Part 1026, Subpart B)",
+    "summary": "An amendment to TILA that addresses billing-error disputes on open-end credit such as credit cards, giving consumers a process to challenge incorrect charges.",
+    "applies_to": ["Credit card"],
+    "key_provisions": [
+      "Consumer may dispute a billing error in writing within 60 days",
+      "Creditor must acknowledge within 30 days and resolve within two billing cycles",
+      "Charge in dispute may be withheld during investigation",
+      "Protections for unauthorized charges and goods not delivered"
+    ]
+  }
+]
