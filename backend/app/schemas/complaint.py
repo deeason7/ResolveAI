@@ -1,0 +1,80 @@
+"""
+Pydantic request/response schemas for the complaints API.
+
+ORM (app.models.complaint.Complaint) defines the row shape; these define
+the wire shape. Keeping them separate lets the table evolve without
+breaking the contract, and prevents accidentally exposing internal
+fields like priority_score before it's been calibrated.
+"""
+
+from __future__ import annotations
+
+import uuid
+from datetime import datetime
+
+from pydantic import BaseModel, ConfigDict, Field
+
+from app.models.complaint import ComplaintStatus
+
+
+class ComplaintCreate(BaseModel):
+    """Body for POST /complaints/ — user-submitted complaint."""
+
+    narrative: str = Field(min_length=10, max_length=20_000)
+    product: str | None = Field(default=None, max_length=255)
+    sub_product: str | None = Field(default=None, max_length=255)
+    issue: str | None = Field(default=None, max_length=255)
+    sub_issue: str | None = Field(default=None, max_length=255)
+    company: str | None = Field(default=None, max_length=255)
+    state: str | None = Field(default=None, min_length=2, max_length=2)
+
+
+class ComplaintPublic(BaseModel):
+    """Full complaint as returned by GET /complaints/{id} and POST /complaints/."""
+
+    model_config = ConfigDict(from_attributes=True)
+
+    id: uuid.UUID
+    cfpb_complaint_id: str | None
+    narrative: str
+    product: str | None
+    sub_product: str | None
+    issue: str | None
+    sub_issue: str | None
+    company: str | None
+    company_response: str | None
+    state: str | None
+    date_received: datetime | None
+    status: ComplaintStatus
+    sentiment: str | None
+    intent: str | None
+    urgency: int | None
+    priority_score: float | None
+    created_at: datetime
+    updated_at: datetime
+
+
+class ComplaintListResponse(BaseModel):
+    """Paginated list of complaints."""
+
+    items: list[ComplaintPublic]
+    total: int
+    limit: int
+    offset: int
+
+
+class BulkImportRequest(BaseModel):
+    """Body for POST /complaints/bulk-import (admin only)."""
+
+    path: str = Field(description="Server-local CSV path (must be under /fine_tuning/data/)")
+    batch_size: int = Field(default=10_000, ge=100, le=50_000)
+
+
+class BulkImportResponse(BaseModel):
+    """Result counts from a bulk-import run."""
+
+    rows_read: int
+    rows_inserted: int
+    rows_skipped: int
+    batches: int
+    elapsed_seconds: float

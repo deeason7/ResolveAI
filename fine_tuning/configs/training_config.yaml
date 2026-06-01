@@ -1,0 +1,200 @@
+# QLoRA fine-tuning configuration for the ResolveAI complaint classifier.
+#
+# Targets a free Colab T4 GPU (16 GB VRAM). Hyperparameters are tuned for
+# Qwen2.5-3B-Instruct in 4-bit NF4 quantization with LoRA adapters on all
+# linear projections. Effective batch size = 2 * 8 = 16.
+#
+# To experiment: copy this file, tweak, and pass --config <your_copy.yaml>.
+
+# ---------------------------------------------------------------------------
+# Base model
+# ---------------------------------------------------------------------------
+model:
+  # 3B instruct model — small enough to QLoRA on a T4, large enough to learn
+  # structured-output behaviour cleanly. ChatML tokenizer.
+  base_model: "Qwen/Qwen2.5-3B-Instruct"
+
+  # Hard cap on input length. Real records (system + user + assistant JSON)
+  # sit at ~700-900 tokens for the 95th percentile, so 2048 leaves plenty of
+  # headroom and matches the spec.
+  max_seq_length: 2048
+
+# ---------------------------------------------------------------------------
+# QLoRA 4-bit quantization (bitsandbytes)
+# ---------------------------------------------------------------------------
+quantization:
+  load_in_4bit: true
+
+  # NF4 (NormalFloat4) — information-theoretically optimal 4-bit datatype
+  # for weights drawn from a roughly normal distribution. Beats fp4 in
+  # quality for the same memory footprint.
+  bnb_4bit_quant_type: "nf4"
+
+  # T4 GPUs have no bf16 tensor cores. float16 is the only fast option.
+  # On an A100/H100, switch this to "bfloat16" and flip training.fp16=false,
+  # training.bf16=true.
+  bnb_4bit_compute_dtype: "float16"
+
+  # Double-quantize the quantization constants themselves. Saves ~0.4 bits
+  # per weight on average — free memory with negligible quality cost.
+  bnb_4bit_use_double_quant: true
+
+# ---------------------------------------------------------------------------
+# LoRA adapter
+# ---------------------------------------------------------------------------
+lora:
+  # Rank of the low-rank update matrices. r=16 is the sweet spot for 3B
+  # instruct models: enough capacity to learn classification patterns,
+  # small enough to stay under 1% of base params.
+  r: 16
+
+  # Scaling factor. Conventional wisdom says α = r gives an effective
+  # learning rate multiplier of 1.0, which keeps the update stable.
+  alpha: 16
+
+  # Apply LoRA to every linear projection (q, k, v, o, gate, up, down).
+  # Broader coverage > selective targeting for downstream task quality;
+  # the marginal cost is tiny because each adapter is r-rank.
+  target_modules: "all-linear"
+
+  # Zero dropout — we have plenty of training data (8K examples) relative
+  # to the adapter's capacity, so explicit regularization hurts more
+  # than it helps.
+  dropout: 0.0
+
+  # Don't train biases. They're a tiny fraction of params and adding them
+  # to LoRA is a known source of training instability.
+  bias: "none"
+
+  task_type: "CAUSAL_LM"
+
+# ---------------------------------------------------------------------------
+# Training hyperparameters (passed to TRL SFTConfig)
+# ---------------------------------------------------------------------------
+training:
+  output_dir: "./resolveai-sentiment-lora"
+
+  num_train_epochs: 3
+
+  # T4 with 16 GB can fit Qwen2.5-3B-4bit + LoRA + activations at batch=2
+  # / seq=2048. Going higher OOMs.
+  per_device_train_batch_size: 2
+  per_device_eval_batch_size: 4
+
+  # Effective batch = 2 * 8 = 16. The model sees 16 examples per optimizer
+  # step, which gives a smooth gradient signal even though VRAM only holds 2.
+  gradient_accumulation_steps: 8
+
+  # 2e-4 is the standard QLoRA learning rate — low enough that the frozen
+  # base doesn't drift, high enough that LoRA matrices learn meaningfully
+  # in 3 epochs.
+  learning_rate: 2.0e-4
+
+  # Cosine decay → warmup is brief (5%), then LR rises to peak, then
+  # smoothly decays to ~0 by end of training. Generalizes better than
+  # constant or linear schedules for SFT.
+  lr_scheduler_type: "cosine"
+  warmup_ratio: 0.05
+
+  weight_decay: 0.01
+
+  # Paged 8-bit AdamW. The "paged" part means optimizer state pages
+  # spill to CPU RAM when VRAM fills up — critical for fitting a 3B
+  # model + Adam state on a T4.
+  optim: "paged_adamw_8bit"
+
+  fp16: true
+  bf16: false
+
+  # Gradient clipping at 0.3 — aggressive but standard for QLoRA. Prevents
+  # the rare giant-gradient step from destabilizing the quantized base.
+  max_grad_norm: 0.3
+
+  # Trades compute for memory: recompute activations during backward
+  # instead of storing them. ~25% slower per step, but the only way to
+  # fit max_seq_length=2048 on a T4.
+  gradient_checkpointing: true
+
+  logging_steps: 10
+
+  # Evaluate + checkpoint every 100 steps. With 8K train / batch 16 = 500
+  # steps per epoch, that's 5 evals per epoch = 15 total.
+  eval_strategy: "steps"
+  eval_steps: 100
+  save_strategy: "steps"
+  save_steps: 100
+
+  # Keep only the 3 best checkpoints on disk; older ones get pruned.
+  # Each LoRA adapter is ~70MB, so 3 * 70MB stays well under Colab disk.
+  save_total_limit: 3
+
+  # When training finishes, reload the checkpoint with the lowest
+  # eval_loss — not necessarily the final one. Acts as built-in
+  # early-stopping insurance.
+  load_best_model_at_end: true
+  metric_for_best_model: "eval_loss"
+  greater_is_better: false
+
+  # No external tracking by default. Flip to "wandb" if you have a key
+  # in WANDB_API_KEY and want loss curves online.
+  report_to: "none"
+
+  seed: 42
+
+  # Mask system + user tokens to -100 in labels so the loss only flows
+  # through the assistant JSON output. Without this, TRL supervises the
+  # entire chat sequence — the model burns capacity predicting the user's
+  # complaint narrative, per-token CE is dominated by high-entropy user
+  # text, and the class_weights signal gets diluted across thousands of
+  # off-target tokens. TRL added this flag in 0.13; older versions silently
+  # drop it via _filter_sft_kwargs (and would need a manual completion-only
+  # data collator as a fallback).
+  assistant_only_loss: true
+
+# ---------------------------------------------------------------------------
+# Class-imbalance mitigation
+#
+# The CFPB narrative dataset is heavily skewed — see audit_labels.py output:
+# ~53% negative / 45% extreme_negative / 2% neutral. Vanilla SFT minimizes
+# average loss and would happily ignore the minority class to get there. We
+# compensate by weighting per-example loss by an inverse-frequency factor
+# derived from the sentiment label of each training example.
+#
+# When disabled the trainer behaves identically to a stock SFTTrainer, so
+# you can A/B with this single toggle.
+# ---------------------------------------------------------------------------
+class_weights:
+  # Master switch. With false, vanilla SFT; with true, the WeightedSFTTrainer
+  # subclass kicks in and applies per-example weighting at compute_loss time.
+  enabled: true
+
+  # How to derive the weights from the train split's class frequencies:
+  #   sqrt_inverse_freq — weight = sqrt(N_total / (K * N_class))
+  #     Gentler. Reduces over-correction on tiny classes where the inverse
+  #     frequency itself would be a 25-50× multiplier on noisy labels.
+  #   inverse_freq      — weight = N_total / (K * N_class)
+  #     Full compensation. Use when the minority class is well-labeled and
+  #     you'd rather overfit minority noise than miss minority signal.
+  #   none              — uniform weights = 1.0 (same as enabled=false).
+  method: "sqrt_inverse_freq"
+
+  # Per-class multiplier applied AFTER the method-based weight. Lets you
+  # nudge individual classes without recomputing — e.g. set neutral: 1.5 to
+  # boost it 50% above the sqrt-inverse value. Defaults to 1.0 for any
+  # class not listed here.
+  manual_scale:
+    neutral: 1.0
+    negative: 1.0
+    extreme_negative: 1.0
+
+# ---------------------------------------------------------------------------
+# Data paths
+#
+# Relative paths are resolved against the script's parent directory
+# (i.e., fine_tuning/), so this config works whether you run the script
+# from repo root, from fine_tuning/, or by absolute path. Absolute paths
+# are used verbatim.
+# ---------------------------------------------------------------------------
+data:
+  train_path: "data/formatted/train.jsonl"
+  val_path: "data/formatted/val.jsonl"

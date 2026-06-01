@@ -53,16 +53,22 @@ pyrightconfig.json
 # Jupyter
 .ipynb_checkpoints
 *.ipynb
+!fine_tuning/colab_train.ipynb
 
 # Data files
 fine_tuning/data/raw/
 fine_tuning/data/processed/
+fine_tuning/data/labeled/
+fine_tuning/data/formatted/
+fine_tuning/data/audit/
 fine_tuning/models/
+fine_tuning/results/
 *.csv
 *.parquet
 *.pkl
 *.bin
 *.safetensors
+*.jsonl
 
 # Docker
 .docker/
