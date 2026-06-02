@@ -65,13 +65,12 @@ async def client():
                 raise
 
     from app.main import create_app
+
     test_app = create_app()
     test_app.dependency_overrides[get_session] = override_session
 
     with patch("app.api.routes.auth.aioredis.from_url", side_effect=_make_fake_redis):
-        async with AsyncClient(
-            transport=ASGITransport(app=test_app), base_url="http://test"
-        ) as ac:
+        async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
             yield ac
     # Do NOT dispose the module-level engine — it's reused across tests.
     # The next test's setup wipes the schema via drop_all/create_all.

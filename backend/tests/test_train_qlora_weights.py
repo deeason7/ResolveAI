@@ -56,15 +56,11 @@ class TestExtractSentiment:
         assert train_qlora._extract_sentiment_from_messages(messages) is None
 
     def test_returns_none_when_sentiment_key_missing(self):
-        messages = [
-            {"role": "assistant", "content": json.dumps({"intent": "fraud_report"})}
-        ]
+        messages = [{"role": "assistant", "content": json.dumps({"intent": "fraud_report"})}]
         assert train_qlora._extract_sentiment_from_messages(messages) is None
 
     def test_returns_none_when_sentiment_isnt_string(self):
-        messages = [
-            {"role": "assistant", "content": json.dumps({"sentiment": 42})}
-        ]
+        messages = [{"role": "assistant", "content": json.dumps({"sentiment": 42})}]
         assert train_qlora._extract_sentiment_from_messages(messages) is None
 
     def test_handles_empty_message_list(self):
@@ -254,12 +250,26 @@ class TestCountSentimentsInJsonl:
             "\n".join(
                 [
                     json.dumps(
-                        {"messages": [{"role": "assistant", "content": json.dumps({"sentiment": "neutral"})}]}
+                        {
+                            "messages": [
+                                {
+                                    "role": "assistant",
+                                    "content": json.dumps({"sentiment": "neutral"}),
+                                }
+                            ]
+                        }
                     ),
                     "not json",
                     "",
                     json.dumps(
-                        {"messages": [{"role": "assistant", "content": json.dumps({"sentiment": "neutral"})}]}
+                        {
+                            "messages": [
+                                {
+                                    "role": "assistant",
+                                    "content": json.dumps({"sentiment": "neutral"}),
+                                }
+                            ]
+                        }
                     ),
                 ]
             ),
