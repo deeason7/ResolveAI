@@ -70,6 +70,7 @@ dev = [
 [tool.ruff]
 line-length = 100
 target-version = "py311"
+extend-exclude = ["alembic"]  # auto-generated migrations + env bootstrap — not ours to style
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "UP", "B", "C4", "PIE"]
@@ -78,6 +79,12 @@ ignore = [
     "B008",   # Depends()/Query() in defaults — required by FastAPI
     "UP042",  # str + Enum → StrEnum migration — deferred refactor
 ]
+
+[tool.ruff.lint.per-file-ignores]
+# conftest sets env vars at module scope *before* importing the app (so
+# pydantic-settings sees them), so its imports can't all sit at the top (E402)
+# and the split block isn't sortable as one unit (I001).
+"tests/conftest.py" = ["E402", "I001"]
 
 [tool.ruff.format]
 quote-style = "double"

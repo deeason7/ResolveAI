@@ -9,7 +9,6 @@ pytest tmp_path so we don't have to write into the container's
 import csv
 from pathlib import Path
 
-import pytest
 import pytest_asyncio
 from httpx import AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -99,9 +98,7 @@ class TestSubmit:
         r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT)
         assert r.status_code == 401
 
-    async def test_submit_rejects_short_narrative(
-        self, client: AsyncClient, analyst_token: str
-    ):
+    async def test_submit_rejects_short_narrative(self, client: AsyncClient, analyst_token: str):
         body = {**VALID_COMPLAINT, "narrative": "too short"}
         r = await client.post(COMPLAINTS_URL, json=body, headers=_auth(analyst_token))
         assert r.status_code == 422
@@ -173,9 +170,7 @@ class TestList:
         assert all(item["product"] == "Mortgage" for item in body["items"])
 
         # Pagination — limit=1 returns 1 item but total still 3
-        r = await client.get(
-            COMPLAINTS_URL, params={"limit": 1}, headers=_auth(analyst_token)
-        )
+        r = await client.get(COMPLAINTS_URL, params={"limit": 1}, headers=_auth(analyst_token))
         body = r.json()
         assert body["total"] == 3
         assert len(body["items"]) == 1
@@ -195,14 +190,10 @@ class TestBulkImport:
         assert r.status_code == 403
 
     async def test_requires_auth(self, client: AsyncClient):
-        r = await client.post(
-            BULK_IMPORT_URL, json={"path": "/fine_tuning/data/raw/anything.csv"}
-        )
+        r = await client.post(BULK_IMPORT_URL, json={"path": "/fine_tuning/data/raw/anything.csv"})
         assert r.status_code == 401
 
-    async def test_rejects_path_outside_sandbox(
-        self, client: AsyncClient, admin_token: str
-    ):
+    async def test_rejects_path_outside_sandbox(self, client: AsyncClient, admin_token: str):
         r = await client.post(
             BULK_IMPORT_URL,
             json={"path": "/etc/passwd"},
@@ -249,30 +240,48 @@ class TestBulkImport:
                 ],
             )
             w.writeheader()
-            w.writerow({
-                "complaint_id": "1001",
-                "consumer_complaint_narrative": "I was charged a late fee even though I paid on time.",
-                "product": "Credit card",
-                "sub_product": "", "issue": "Fee", "sub_issue": "",
-                "company": "BankCo", "company_response": "In progress",
-                "state": "CA", "date_received": "2024-01-15",
-            })
-            w.writerow({
-                "complaint_id": "1002",
-                "consumer_complaint_narrative": "My mortgage payment was misapplied to the wrong account.",
-                "product": "Mortgage",
-                "sub_product": "", "issue": "Payment", "sub_issue": "",
-                "company": "MortgageCo", "company_response": "Closed",
-                "state": "NY", "date_received": "2024-02-20",
-            })
-            w.writerow({
-                "complaint_id": "",   # missing source id → still ingestible (NULL allowed)
-                "consumer_complaint_narrative": "Funds transfer never reached the recipient.",
-                "product": "Money transfer",
-                "sub_product": "", "issue": "Delay", "sub_issue": "",
-                "company": "TransferCo", "company_response": "In progress",
-                "state": "TX", "date_received": "2024-03-10",
-            })
+            w.writerow(
+                {
+                    "complaint_id": "1001",
+                    "consumer_complaint_narrative": "I was charged a late fee even though I paid on time.",
+                    "product": "Credit card",
+                    "sub_product": "",
+                    "issue": "Fee",
+                    "sub_issue": "",
+                    "company": "BankCo",
+                    "company_response": "In progress",
+                    "state": "CA",
+                    "date_received": "2024-01-15",
+                }
+            )
+            w.writerow(
+                {
+                    "complaint_id": "1002",
+                    "consumer_complaint_narrative": "My mortgage payment was misapplied to the wrong account.",
+                    "product": "Mortgage",
+                    "sub_product": "",
+                    "issue": "Payment",
+                    "sub_issue": "",
+                    "company": "MortgageCo",
+                    "company_response": "Closed",
+                    "state": "NY",
+                    "date_received": "2024-02-20",
+                }
+            )
+            w.writerow(
+                {
+                    "complaint_id": "",  # missing source id → still ingestible (NULL allowed)
+                    "consumer_complaint_narrative": "Funds transfer never reached the recipient.",
+                    "product": "Money transfer",
+                    "sub_product": "",
+                    "issue": "Delay",
+                    "sub_issue": "",
+                    "company": "TransferCo",
+                    "company_response": "In progress",
+                    "state": "TX",
+                    "date_received": "2024-03-10",
+                }
+            )
 
         r = await client.post(
             BULK_IMPORT_URL,
@@ -302,20 +311,33 @@ class TestBulkImport:
             w = csv.DictWriter(
                 f,
                 fieldnames=[
-                    "complaint_id", "consumer_complaint_narrative", "product",
-                    "sub_product", "issue", "sub_issue", "company",
-                    "company_response", "state", "date_received",
+                    "complaint_id",
+                    "consumer_complaint_narrative",
+                    "product",
+                    "sub_product",
+                    "issue",
+                    "sub_issue",
+                    "company",
+                    "company_response",
+                    "state",
+                    "date_received",
                 ],
             )
             w.writeheader()
-            w.writerow({
-                "complaint_id": "9001",
-                "consumer_complaint_narrative": "A complaint that we will try to import twice.",
-                "product": "Checking account",
-                "sub_product": "", "issue": "Fees", "sub_issue": "",
-                "company": "BankCo", "company_response": "Closed",
-                "state": "CA", "date_received": "2024-04-01",
-            })
+            w.writerow(
+                {
+                    "complaint_id": "9001",
+                    "consumer_complaint_narrative": "A complaint that we will try to import twice.",
+                    "product": "Checking account",
+                    "sub_product": "",
+                    "issue": "Fees",
+                    "sub_issue": "",
+                    "company": "BankCo",
+                    "company_response": "Closed",
+                    "state": "CA",
+                    "date_received": "2024-04-01",
+                }
+            )
 
         first = await client.post(
             BULK_IMPORT_URL,
@@ -331,4 +353,4 @@ class TestBulkImport:
         )
         assert second.status_code == 200
         assert second.json()["rows_read"] == 1
-        assert second.json()["rows_inserted"] == 0   # ON CONFLICT skipped it
+        assert second.json()["rows_inserted"] == 0  # ON CONFLICT skipped it

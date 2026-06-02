@@ -17,6 +17,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.security import decode_access_token
 from app.database import get_session
 from app.models.user import User, UserRole
+from app.services.graph_store import GraphStore, get_default_graph_store
 
 logger = logging.getLogger(__name__)
 
@@ -65,3 +66,13 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
             detail="Admin role required",
         )
     return current_user
+
+
+def get_graph_store() -> GraphStore:
+    """Inject the process-wide Neo4j graph store.
+
+    A thin Depends() wrapper over the lru_cache singleton so routes stay
+    decoupled from how the store is built — and tests can swap a mock via
+    app.dependency_overrides[get_graph_store] without monkeypatching the module.
+    """
+    return get_default_graph_store()

@@ -1,0 +1,74 @@
+[
+  {
+    "id": "monetary_relief",
+    "pattern_type": "Closed with monetary relief",
+    "description": "The company resolved the complaint by providing monetary compensation — a refund, fee reversal, credit, or other payment to the consumer.",
+    "success_rate": 0.95,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed with monetary relief"],
+    "addresses": ["fee", "charge", "billing", "payment", "fraud", "unauthorized", "refund", "interest"]
+  },
+  {
+    "id": "non_monetary_relief",
+    "pattern_type": "Closed with non-monetary relief",
+    "description": "The company resolved the complaint without a payment — e.g., correcting a credit report, releasing a lien, stopping collection calls, or fixing an account error.",
+    "success_rate": 0.85,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed with non-monetary relief"],
+    "addresses": ["report", "information", "credit", "account", "collection", "correction", "verification"]
+  },
+  {
+    "id": "relief_generic",
+    "pattern_type": "Closed with relief",
+    "description": "The company closed the complaint with relief of an unspecified type. Treated as a positive outcome below the monetary/non-monetary split.",
+    "success_rate": 0.88,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed with relief"],
+    "addresses": []
+  },
+  {
+    "id": "explanation",
+    "pattern_type": "Closed with explanation",
+    "description": "The company closed the complaint by explaining its position to the consumer without providing relief. The most common outcome in the CFPB dataset.",
+    "success_rate": 0.55,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed with explanation"],
+    "addresses": ["information", "communication", "statement", "disclosure", "process"]
+  },
+  {
+    "id": "without_relief",
+    "pattern_type": "Closed without relief",
+    "description": "The company closed the complaint without providing any relief to the consumer.",
+    "success_rate": 0.30,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed without relief"],
+    "addresses": []
+  },
+  {
+    "id": "closed",
+    "pattern_type": "Closed",
+    "description": "The company closed the complaint without a documented relief category. Outcome quality is ambiguous.",
+    "success_rate": 0.40,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Closed"],
+    "addresses": []
+  },
+  {
+    "id": "untimely",
+    "pattern_type": "Untimely response",
+    "description": "The company failed to respond to the complaint within the regulatory timeframe. A negative signal for company risk scoring.",
+    "success_rate": 0.10,
+    "success_rate_source": "heuristic_prior",
+    "response_values": ["Untimely response"],
+    "addresses": []
+  },
+  {
+    "id": "in_progress",
+    "pattern_type": "In progress",
+    "description": "The complaint is still being worked and has no terminal outcome yet. Excluded from success-rate aggregations.",
+    "success_rate": null,
+    "success_rate_source": "not_applicable",
+    "response_values": ["In progress"],
+    "addresses": []
+  }
+]

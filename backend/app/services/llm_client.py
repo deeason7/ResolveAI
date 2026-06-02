@@ -97,17 +97,25 @@ class LLMClient:
 
     @staticmethod
     def _build_chain(settings: Settings) -> list[_ProviderCfg]:
-        """Ollama is always primary; Groq is appended only when a key is set."""
-        # Ollama's OpenAI-compatible surface lives under /v1.
-        ollama_base = settings.ollama_base_url.rstrip("/") + "/v1"
-        chain = [
-            _ProviderCfg(
-                provider=Provider.OLLAMA,
-                base_url=ollama_base,
-                api_key="ollama",  # ignored by Ollama; OpenAI SDK needs non-empty
-                model=settings.ollama_model,
+        """Ollama is primary; Groq is appended when a key is set.
+
+        With ``llm_skip_local`` on, Ollama is dropped so requests go straight to
+        Groq. On hardware that can't serve the local SLM, trying it first only
+        buys a guaranteed failure and a wasted timeout on every call — so Groq
+        becomes the de-facto primary (``is_fallback`` is then False for it).
+        """
+        chain: list[_ProviderCfg] = []
+        if not settings.llm_skip_local:
+            # Ollama's OpenAI-compatible surface lives under /v1.
+            ollama_base = settings.ollama_base_url.rstrip("/") + "/v1"
+            chain.append(
+                _ProviderCfg(
+                    provider=Provider.OLLAMA,
+                    base_url=ollama_base,
+                    api_key="ollama",  # ignored by Ollama; OpenAI SDK needs non-empty
+                    model=settings.ollama_model,
+                )
             )
-        ]
         if settings.groq_api_key:
             chain.append(
                 _ProviderCfg(

@@ -24,7 +24,7 @@ from app.services.llm_client import (
 )
 
 
-def _settings(groq_key: str = "") -> SimpleNamespace:
+def _settings(groq_key: str = "", skip_local: bool = False) -> SimpleNamespace:
     return SimpleNamespace(
         llm_timeout_s=5.0,
         classification_max_retries=1,
@@ -33,6 +33,7 @@ def _settings(groq_key: str = "") -> SimpleNamespace:
         groq_api_key=groq_key,
         groq_base_url="https://api.groq.com/openai/v1",
         groq_model="llama-3.3-70b-versatile",
+        llm_skip_local=skip_local,
     )
 
 
@@ -86,6 +87,19 @@ class TestBuildChain:
     def test_ollama_base_url_gets_v1_suffix(self):
         c = LLMClient(settings=_settings())
         assert c._chain[0].base_url.endswith("/v1")
+
+    def test_skip_local_drops_ollama(self):
+        c = LLMClient(settings=_settings(groq_key="gk", skip_local=True))
+        assert [cfg.provider for cfg in c._chain] == [Provider.GROQ]
+
+    def test_skip_local_makes_groq_primary_not_fallback(self):
+        # With Ollama skipped, Groq is at index 0, so a success is NOT a fallback.
+        good = _FakeClient(result=(_Dummy(x=9), _completion(4, 2)))
+        c = LLMClient(settings=_settings(groq_key="gk", skip_local=True))
+        c._clients[Provider.GROQ] = good
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.provider == Provider.GROQ
+        assert resp.is_fallback is False
 
 
 class TestStructured:

@@ -9,11 +9,8 @@ the user can hit before any subprocess fires.
 from __future__ import annotations
 
 import importlib.util
-import os
 import sys
 from pathlib import Path
-
-import pytest
 
 # 05_export_gguf is not importable by `import` because filenames can't start
 # with a digit in Python identifiers. Same pattern as test_train_qlora_weights
@@ -150,9 +147,7 @@ class TestRenderModelfile:
         # Locked invariant: TRAINING_SYSTEM_PROMPT in 05_export_gguf must equal
         # SYSTEM_PROMPT in 02_format_training_data — drift breaks inference.
         fmt_script = (
-            Path(__file__).resolve().parents[2]
-            / "fine_tuning"
-            / "02_format_training_data.py"
+            Path(__file__).resolve().parents[2] / "fine_tuning" / "02_format_training_data.py"
         )
         text = fmt_script.read_text()
         # Extract the SYSTEM_PROMPT literal robustly: it's the multi-line

@@ -65,9 +65,7 @@ class TestBuildUserPrompt:
         # PRODUCT, ISSUE, COMPANY. Tests pin the order so a future "let's
         # alphabetize the fields" refactor breaks at lint time, not at
         # inference where it'd silently degrade accuracy.
-        prompt = smoke_test.build_user_prompt(
-            "x", company="C", issue="I", product="P"
-        )
+        prompt = smoke_test.build_user_prompt("x", company="C", issue="I", product="P")
         lines = prompt.split("\n")
         assert lines[0].startswith("COMPLAINT:")
         assert lines[1].startswith("PRODUCT:")
@@ -80,9 +78,7 @@ class TestBuildUserPrompt:
         # for the same inputs. A drift would mean inference distribution
         # diverges from training distribution.
         fmt_path = (
-            Path(__file__).resolve().parents[2]
-            / "fine_tuning"
-            / "02_format_training_data.py"
+            Path(__file__).resolve().parents[2] / "fine_tuning" / "02_format_training_data.py"
         )
         text = fmt_path.read_text()
         # The format script builds the same prefix strings. Verify the
@@ -199,9 +195,7 @@ class TestModuleConstants:
 
     def test_system_prompt_matches_format_script(self):
         fmt_path = (
-            Path(__file__).resolve().parents[2]
-            / "fine_tuning"
-            / "02_format_training_data.py"
+            Path(__file__).resolve().parents[2] / "fine_tuning" / "02_format_training_data.py"
         )
         text = fmt_path.read_text()
         assert "You are a financial complaint classifier." in text
@@ -215,9 +209,7 @@ class TestModuleConstants:
         # 05_export_gguf creates the GGUF + Modelfile with --model-name
         # "resolveai-sentiment" by default. The smoke test must point at
         # the same name so ollama can find it.
-        export_path = (
-            Path(__file__).resolve().parents[2] / "fine_tuning" / "05_export_gguf.py"
-        )
+        export_path = Path(__file__).resolve().parents[2] / "fine_tuning" / "05_export_gguf.py"
         text = export_path.read_text()
         assert 'DEFAULT_MODEL_NAME = "resolveai-sentiment"' in text
         assert smoke_test.DEFAULT_MODEL == "resolveai-sentiment"

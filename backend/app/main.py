@@ -8,6 +8,7 @@ with different config overrides.
 """
 
 import logging
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +16,10 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import auth, complaints
+from app.api.routes import auth, complaints, graph
 from app.config import settings
 from app.middleware.rate_limit import limiter
+from app.services.graph_store import get_default_graph_store
 
 logging.basicConfig(
     level=settings.log_level,
@@ -25,6 +27,22 @@ logging.basicConfig(
 )
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Startup/shutdown hooks.
+
+    Nothing to warm on startup — Postgres/Redis/Qdrant/Neo4j all connect lazily
+    on first use, which is how the rest of the app treats its backing services.
+    On shutdown we close the Neo4j driver's connection pool, but only if it was
+    ever opened: checking cache_info() avoids instantiating a driver (and a
+    socket) purely to tear it down in a process that never touched the graph.
+    """
+    yield
+    if get_default_graph_store.cache_info().currsize:
+        await get_default_graph_store().close()
+        logger.info("closed Neo4j driver")
 
 
 def create_app() -> FastAPI:
@@ -35,6 +53,7 @@ def create_app() -> FastAPI:
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
+        lifespan=lifespan,
     )
 
     # Rate limiting
@@ -57,6 +76,7 @@ def create_app() -> FastAPI:
     # Routers
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(complaints.router, prefix="/api/v1")
+    app.include_router(graph.router, prefix="/api/v1")
 
     @app.get("/api/v1/health", tags=["infra"])
     async def health() -> dict:

@@ -28,6 +28,9 @@ env/
 venv/
 ENV/
 
+# uv (local-only dep resolver; the Docker image installs from pyproject via pip)
+uv.lock
+
 # Distribution / packaging
 pip-wheel-metadata/
 share/python-wheels/
