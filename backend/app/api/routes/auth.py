@@ -89,7 +89,7 @@ async def register(
 
     await _audit(session, request, user.id, "register")
 
-    access = create_access_token(str(user.id), user.role.value)
+    access = create_access_token(str(user.id), user.role)
     refresh = create_refresh_token(str(user.id))
     _set_refresh_cookie(response, refresh)
 
@@ -119,7 +119,7 @@ async def login(
 
     await _audit(session, request, user.id, "login")
 
-    access = create_access_token(str(user.id), user.role.value)
+    access = create_access_token(str(user.id), user.role)
     refresh = create_refresh_token(str(user.id))
     _set_refresh_cookie(response, refresh)
 
@@ -154,7 +154,7 @@ async def refresh(
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
-    new_access = create_access_token(str(user.id), user.role.value)
+    new_access = create_access_token(str(user.id), user.role)
     new_refresh = create_refresh_token(str(user.id))
 
     # Rotate: revoke old, issue new

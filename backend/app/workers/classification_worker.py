@@ -41,6 +41,7 @@ from app.database import AsyncSessionLocal
 from app.models.complaint import Complaint, ComplaintStatus
 from app.services.classifier import Classifier
 from app.services.embedder import embed_text
+from app.services.graph_store import GraphStore, get_default_graph_store
 from app.services.llmops_tracker import LLMOpsTracker
 from app.services.vector_store import VectorStore, get_default_store
 
@@ -96,6 +97,7 @@ class ClassificationWorker:
         classifier: Classifier,
         vector_store: VectorStore,
         *,
+        graph_store: GraphStore | None = None,
         tracker: LLMOpsTracker | None = None,
         settings: Settings | None = None,
         session_factory: Any = AsyncSessionLocal,
@@ -104,6 +106,9 @@ class ClassificationWorker:
         self.redis = redis_client
         self.classifier = classifier
         self.vector_store = vector_store
+        # Optional: when absent (e.g. most unit tests) the graph write is skipped.
+        # Production wires the singleton in main(); graph upserts are best-effort.
+        self.graph_store = graph_store
         self.tracker = tracker or LLMOpsTracker()
         self.settings = settings or default_settings
         self.session_factory = session_factory
@@ -244,6 +249,7 @@ class ClassificationWorker:
             )
 
         await self._index(complaint_id, complaint.narrative, complaint, cls)
+        await self._update_graph(complaint)
 
     async def _index(
         self,
@@ -279,6 +285,35 @@ class ClassificationWorker:
                 complaint_id,
             )
 
+    async def _update_graph(self, complaint: Complaint) -> None:
+        """Best-effort: fold this complaint's company/product/issue into the graph.
+
+        Same contract as ``_index``: Postgres is already committed, so a Neo4j
+        hiccup is logged and swallowed rather than re-running the (expensive)
+        classification. Keeping the graph's HAS_COMPLAINTS_ABOUT / HAS_ISSUE
+        counters live as complaints arrive is the point — a stale graph is
+        recoverable by re-running the seeder; a lost classification is not.
+
+        We pass only the structured CFPB fields. Mapping the classifier's
+        free-text regulation entities ("15 USC 1681") to Regulation node ids
+        ("FCRA") for VIOLATED edges needs a normalization table and is deferred
+        with the regulation-set expansion (tracked in the phase notes).
+        """
+        if self.graph_store is None:
+            return
+        try:
+            await self.graph_store.upsert_complaint_entities(
+                complaint_id=str(complaint.id),
+                company=complaint.company,
+                product=complaint.product,
+                issue=complaint.issue,
+            )
+        except Exception:
+            logger.exception(
+                "graph upsert failed for %s (postgres committed); graph aggregates will lag",
+                complaint.id,
+            )
+
 
 async def main() -> None:
     """Wire real dependencies and run until SIGINT/SIGTERM."""
@@ -291,6 +326,7 @@ async def main() -> None:
         redis_client=redis_client,
         classifier=Classifier(),
         vector_store=get_default_store(),
+        graph_store=get_default_graph_store(),
     )
 
     loop = asyncio.get_running_loop()

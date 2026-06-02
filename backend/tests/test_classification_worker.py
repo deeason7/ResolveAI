@@ -8,6 +8,7 @@ the sentence-transformer model never loads.
 from __future__ import annotations
 
 import uuid
+from unittest.mock import AsyncMock
 
 import fakeredis.aioredis
 import pytest
@@ -106,12 +107,13 @@ async def _seed(factory, **over) -> uuid.UUID:
         return c.id
 
 
-def _worker(redis_client, factory, vector_store, outcome):
+def _worker(redis_client, factory, vector_store, outcome, graph_store=None):
     return ClassificationWorker(
         redis_client=redis_client,
         classifier=_StubClassifier(outcome),
         vector_store=vector_store,
         session_factory=factory,
+        graph_store=graph_store,
     )
 
 
@@ -176,6 +178,41 @@ class TestProcessMessage:
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.classified  # postgres committed
+
+    async def test_graph_upsert_called_with_structured_fields(
+        self, redis_client, factory, vector_store
+    ):
+        cid = await _seed(factory, company="Wells Fargo", product="Mortgage", issue="Servicing")
+        graph_store = AsyncMock()
+        w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
+        await w.process_message({"complaint_id": str(cid)})
+
+        graph_store.upsert_complaint_entities.assert_awaited_once_with(
+            complaint_id=str(cid),
+            company="Wells Fargo",
+            product="Mortgage",
+            issue="Servicing",
+        )
+
+    async def test_graph_failure_still_commits(self, redis_client, factory, vector_store):
+        cid = await _seed(factory)
+        graph_store = AsyncMock()
+        graph_store.upsert_complaint_entities.side_effect = RuntimeError("neo4j down")
+        w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
+        await w.process_message({"complaint_id": str(cid)})  # must not raise
+
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.classified  # postgres committed
+
+    async def test_no_graph_store_skips_upsert(self, redis_client, factory, vector_store):
+        # The default wiring (graph_store=None) must not blow up — the write is skipped.
+        cid = await _seed(factory)
+        w = _worker(redis_client, factory, vector_store, _outcome())
+        await w.process_message({"complaint_id": str(cid)})
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.classified
 
 
 class TestStreamIntegration:

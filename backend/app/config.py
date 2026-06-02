@@ -47,6 +47,11 @@ class Settings(BaseSettings):
     # LLM client behavior
     llm_timeout_s: float = 30.0
     classification_max_retries: int = 2
+    # Drop the local Ollama provider and go straight to the cloud fallback.
+    # Default off (the design is local-first); turn on for hardware that can't
+    # serve the local SLM, so each request doesn't eat a guaranteed local
+    # failure + wasted timeout before reaching the cloud.
+    llm_skip_local: bool = False
 
     # AWS / Bedrock — boto3 picks up credentials from ~/.aws/ or env vars
     # automatically; we only need the region here. The two access-key fields
