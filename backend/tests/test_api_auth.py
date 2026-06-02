@@ -6,8 +6,6 @@ Redis calls in refresh/logout are patched out so tests run without
 a real Redis instance.
 """
 
-from unittest.mock import AsyncMock, patch
-
 import pytest
 from httpx import AsyncClient
 

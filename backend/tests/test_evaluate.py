@@ -71,6 +71,7 @@ class TestExtractNarrative:
         msgs = [{"role": "user", "content": "raw text"}]
         assert evaluate._extract_narrative(msgs) == "raw text"
 
+
 # length buckets
 class TestAssignLengthBucket:
     def test_short_bucket(self):
@@ -84,6 +85,7 @@ class TestAssignLengthBucket:
     def test_long_bucket(self):
         assert evaluate.assign_length_bucket(1500) == "long"
         assert evaluate.assign_length_bucket(50_000) == "long"
+
 
 # parse_prediction
 class TestParsePrediction:
@@ -110,6 +112,7 @@ class TestParsePrediction:
     def test_array_returns_not_an_object(self):
         parsed, err = evaluate.parse_prediction("[1, 2, 3]")
         assert parsed is None and err == "not_an_object"
+
 
 # per_class_prf1
 class TestPerClassPRF1:
@@ -154,6 +157,7 @@ class TestPerClassPRF1:
         assert out["b"]["recall"] == 0.0
         assert out["a"]["recall"] == 1.0
 
+
 # urgency_metrics + Spearman
 class TestUrgencyMetrics:
     def test_perfect_prediction(self):
@@ -190,6 +194,7 @@ class TestRanks:
         ranks = evaluate._ranks([30, 10, 20])
         assert ranks == [3.0, 1.0, 2.0]
 
+
 # confusion_matrix
 class TestConfusionMatrix:
     def test_diagonal_for_perfect_predictions(self):
@@ -208,10 +213,13 @@ class TestConfusionMatrix:
         # The 'z' truth doesn't fall into either bucket → dropped
         assert cm == [[1, 0], [0, 0]]
 
+
 # length_bucketed_accuracy
 class TestLengthBucketedAccuracy:
     def _ex(self, sentiment: str, length: int):
-        return evaluate.TestExample(messages=[], gold={"sentiment": sentiment}, narrative_length=length)
+        return evaluate.TestExample(
+            messages=[], gold={"sentiment": sentiment}, narrative_length=length
+        )
 
     def test_per_class_per_bucket_accuracy(self):
         examples = [
@@ -242,6 +250,7 @@ class TestLengthBucketedAccuracy:
         assert out["short"]["overall_accuracy"] == 1.0  # 2/2
         assert out["medium"]["overall_accuracy"] == 0.0  # 0/1
 
+
 # load_test_examples (file IO)
 class TestLoadTestExamples:
     def test_loads_well_formed_records(self, tmp_path):
@@ -266,13 +275,12 @@ class TestLoadTestExamples:
                 {"role": "assistant", "content": json.dumps({"sentiment": "neutral"})},
             ]
         }
-        rec_bad = {
-            "messages": [{"role": "user", "content": "COMPLAINT: missing assistant"}]
-        }
+        rec_bad = {"messages": [{"role": "user", "content": "COMPLAINT: missing assistant"}]}
         path.write_text(json.dumps(rec_ok) + "\n" + json.dumps(rec_bad) + "\n", encoding="utf-8")
         with caplog.at_level("WARNING"):
             out = evaluate.load_test_examples(path)
         assert len(out) == 1
+
 
 # Spearman behaviour vs known reference values
 class TestResolveAdapterPath:
