@@ -103,7 +103,7 @@
     "cfr_reference": "12 U.S.C. § 5531, § 5536",
     "implementing_regulation": "Consumer Financial Protection Act (Title X of Dodd-Frank)",
     "summary": "Prohibits unfair, deceptive, or abusive acts or practices by providers of consumer financial products and services. The CFPB's broadest enforcement hook, applicable across product lines.",
-    "applies_to": ["Mortgage", "Credit card", "Debt collection", "Credit reporting", "Checking or savings account", "Vehicle loan", "Personal loan", "Student loan", "Money transfer", "Prepaid card"],
+    "applies_to": ["Mortgage", "Credit card", "Debt collection", "Credit reporting", "Checking or savings account", "Vehicle loan", "Personal loan", "Student loan", "Money transfer", "Prepaid card", "Debt or credit management"],
     "key_provisions": [
       "Unfair: causes substantial injury not reasonably avoidable and not outweighed by benefits",
       "Deceptive: misleads a reasonable consumer to their detriment",
@@ -164,6 +164,708 @@
       "Creditor must acknowledge within 30 days and resolve within two billing cycles",
       "Charge in dispute may be withheld during investigation",
       "Protections for unauthorized charges and goods not delivered"
+    ]
+  },
+  {
+    "id": "CLA",
+    "title": "Consumer Leasing Act",
+    "cfr_reference": "15 U.S.C. § 1667",
+    "implementing_regulation": "Regulation M (12 CFR Part 1013)",
+    "summary": "Requires clear disclosure of the costs and terms of consumer leases of personal property, such as vehicle leases, and limits balloon payments.",
+    "applies_to": ["Vehicle loan", "Lease"],
+    "key_provisions": [
+      "Disclosure of total lease cost, payments, and fees before signing",
+      "Limits on residual-value balloon liability at lease end",
+      "Standardized advertising rules for lease terms"
+    ]
+  },
+  {
+    "id": "MLA",
+    "title": "Military Lending Act",
+    "cfr_reference": "10 U.S.C. § 987",
+    "implementing_regulation": "32 CFR Part 232 (DoD)",
+    "summary": "Caps the cost of consumer credit extended to active-duty servicemembers and their dependents and bans certain abusive loan features.",
+    "applies_to": ["Credit card", "Payday loan", "Personal loan", "Vehicle loan"],
+    "key_provisions": [
+      "36% Military Annual Percentage Rate (MAPR) cap, including most fees",
+      "Bans mandatory arbitration and prepayment penalties for covered borrowers",
+      "Requires a covered-borrower check and specific MAPR disclosures"
+    ]
+  },
+  {
+    "id": "FACTA",
+    "title": "Fair and Accurate Credit Transactions Act",
+    "cfr_reference": "15 U.S.C. § 1681 (FCRA amendments)",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022)",
+    "summary": "A 2003 amendment to FCRA focused on identity-theft prevention, fraud alerts, and free annual credit reports.",
+    "applies_to": ["Credit reporting", "Debt collection"],
+    "key_provisions": [
+      "Free annual credit report from each nationwide agency (AnnualCreditReport.com)",
+      "Fraud alerts and credit freezes for identity-theft victims",
+      "Truncation of card numbers on receipts and identity-theft blocking of disputed items"
+    ]
+  },
+  {
+    "id": "HOEPA",
+    "title": "Home Ownership and Equity Protection Act",
+    "cfr_reference": "15 U.S.C. § 1639",
+    "implementing_regulation": "Regulation Z (12 CFR Part 1026.32)",
+    "summary": "A TILA amendment imposing extra protections on high-cost mortgages, targeting predatory home-equity lending.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Triggers extra disclosures and protections when rate/fee thresholds are exceeded",
+      "Bans balloon payments, negative amortization, and certain prepayment penalties on covered loans",
+      "Requires homeownership counseling before a high-cost loan"
+    ]
+  },
+  {
+    "id": "CARD",
+    "title": "Credit Card Accountability Responsibility and Disclosure Act",
+    "cfr_reference": "15 U.S.C. § 1601 note (TILA amendments)",
+    "implementing_regulation": "Regulation Z (12 CFR Part 1026)",
+    "summary": "The 2009 CARD Act curbs surprise credit-card fees and rate hikes and adds protections for consumers under 21.",
+    "applies_to": ["Credit card"],
+    "key_provisions": [
+      "45-day advance notice of rate increases; limits on retroactive rate hikes",
+      "Payments above the minimum applied to the highest-APR balance first",
+      "Ability-to-pay underwriting and limits on fees for consumers under 21"
+    ]
+  },
+  {
+    "id": "EFAA",
+    "title": "Expedited Funds Availability Act",
+    "cfr_reference": "12 U.S.C. § 4001",
+    "implementing_regulation": "Regulation CC (12 CFR Part 229)",
+    "summary": "Sets maximum hold periods for deposited funds so consumers know when checks and deposits become available.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "Next-day availability for cash and certain low-risk deposits",
+      "Maximum hold schedules for local and exception holds",
+      "Disclosure of the institution's funds-availability policy"
+    ]
+  },
+  {
+    "id": "CHECK21",
+    "title": "Check Clearing for the 21st Century Act",
+    "cfr_reference": "12 U.S.C. § 5001",
+    "implementing_regulation": "Regulation CC (12 CFR Part 229)",
+    "summary": "Enables banks to process digital images of checks (substitute checks), speeding collection and clearing.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "Legal equivalence of a properly prepared substitute check to the original",
+      "Expedited recredit rights when a substitute check causes a loss",
+      "Consumer disclosures about substitute checks"
+    ]
+  },
+  {
+    "id": "ESIGN",
+    "title": "Electronic Signatures in Global and National Commerce Act",
+    "cfr_reference": "15 U.S.C. § 7001",
+    "implementing_regulation": "Enforced across agencies",
+    "summary": "Gives electronic signatures and records the same legal effect as paper, provided consumers consent to electronic disclosures.",
+    "applies_to": ["Mortgage", "Credit card", "Checking or savings account", "Student loan"],
+    "key_provisions": [
+      "Electronic records satisfy 'in writing' requirements when consumers consent",
+      "Consumer must affirmatively consent and be able to access the electronic format",
+      "Record-retention rules for electronically signed agreements"
+    ]
+  },
+  {
+    "id": "SAFE",
+    "title": "S.A.F.E. Mortgage Licensing Act",
+    "cfr_reference": "12 U.S.C. § 5101",
+    "implementing_regulation": "Regulations G and H (12 CFR Parts 1007, 1008)",
+    "summary": "Requires mortgage loan originators to register or be licensed and listed in the Nationwide Multistate Licensing System (NMLS).",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Unique NMLS identifier for every mortgage loan originator",
+      "Registration (depository) or state licensing (non-depository) requirement",
+      "Background checks and continuing-education standards"
+    ]
+  },
+  {
+    "id": "MARS",
+    "title": "Mortgage Assistance Relief Services Rule",
+    "cfr_reference": "12 U.S.C. § 5538",
+    "implementing_regulation": "Regulation O (12 CFR Part 1015)",
+    "summary": "Protects homeowners from foreclosure-rescue and loan-modification scams by banning advance fees and deceptive claims.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Bans collection of any fee until the consumer accepts a written offer from their servicer",
+      "Prohibits advising consumers to stop communicating with their lender",
+      "Mandatory disclosures that the provider is not affiliated with the government or lender"
+    ]
+  },
+  {
+    "id": "MAP",
+    "title": "Mortgage Acts and Practices – Advertising Rule",
+    "cfr_reference": "12 U.S.C. § 5538",
+    "implementing_regulation": "Regulation N (12 CFR Part 1014)",
+    "summary": "Prohibits deceptive claims in advertising for mortgage products and credit.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Bans misrepresentations about rates, payments, fees, and government affiliation",
+      "Applies to any commercial communication about mortgage credit",
+      "Record-keeping of advertisements for 24 months"
+    ]
+  },
+  {
+    "id": "HPA",
+    "title": "Homeowners Protection Act",
+    "cfr_reference": "12 U.S.C. § 4901",
+    "implementing_regulation": "Enforced by the CFPB",
+    "summary": "Governs private mortgage insurance (PMI), requiring automatic termination and consumer-requested cancellation at defined equity levels.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Automatic PMI termination at 78% loan-to-value",
+      "Borrower right to request cancellation at 80% LTV",
+      "Annual disclosure of PMI cancellation rights"
+    ]
+  },
+  {
+    "id": "FHA_FAIRHOUSING",
+    "title": "Fair Housing Act",
+    "cfr_reference": "42 U.S.C. § 3601",
+    "implementing_regulation": "24 CFR Part 100 (HUD)",
+    "summary": "Prohibits discrimination in residential real-estate transactions, including mortgage lending, complementing ECOA.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Bans discrimination based on race, color, religion, sex, disability, familial status, or national origin",
+      "Covers mortgage lending, appraisals, and homeowners insurance",
+      "Prohibits redlining and discriminatory terms"
+    ]
+  },
+  {
+    "id": "REMITTANCE",
+    "title": "Remittance Transfer Rule",
+    "cfr_reference": "15 U.S.C. § 1693o-1",
+    "implementing_regulation": "Regulation E, Subpart B (12 CFR Part 1005.30)",
+    "summary": "Extends EFTA protections to international money transfers, requiring upfront disclosures and error-resolution rights.",
+    "applies_to": ["Money transfer"],
+    "key_provisions": [
+      "Pre-payment disclosure of exchange rate, fees, and amount to be received",
+      "30-minute cancellation window for most transfers",
+      "Error-resolution and refund rights for failed or incorrect transfers"
+    ]
+  },
+  {
+    "id": "PREPAID",
+    "title": "Prepaid Accounts Rule",
+    "cfr_reference": "15 U.S.C. § 1693 et seq.",
+    "implementing_regulation": "Regulations E and Z (12 CFR Parts 1005, 1026)",
+    "summary": "Extends consumer protections to prepaid accounts, including standardized fee disclosures and fraud protection.",
+    "applies_to": ["Prepaid card"],
+    "key_provisions": [
+      "Short-form and long-form fee disclosures before acquisition",
+      "Error-resolution and limited liability for registered accounts",
+      "Credit-feature protections aligned with credit-card rules"
+    ]
+  },
+  {
+    "id": "REGF_DEBTCOLL",
+    "title": "Debt Collection Rule",
+    "cfr_reference": "15 U.S.C. § 1692 (FDCPA)",
+    "implementing_regulation": "Regulation F (12 CFR Part 1006)",
+    "summary": "The CFPB's 2021 rule implementing the FDCPA, modernizing limits on collector contact frequency and electronic communications.",
+    "applies_to": ["Debt collection"],
+    "key_provisions": [
+      "Presumptive limit of seven calls per debt within seven days",
+      "Rules for email/text contact and an opt-out mechanism",
+      "Validation-notice content and time-barred-debt disclosure requirements"
+    ]
+  },
+  {
+    "id": "PAYDAY",
+    "title": "Payday, Vehicle Title, and High-Cost Installment Loan Rule",
+    "cfr_reference": "12 U.S.C. § 5531, § 5536",
+    "implementing_regulation": "12 CFR Part 1041",
+    "summary": "Regulates short-term and high-cost loans, focused on preventing repeated unsuccessful withdrawal attempts from borrower accounts.",
+    "applies_to": ["Payday loan", "Title loan", "Vehicle loan"],
+    "key_provisions": [
+      "Bans further withdrawal attempts after two consecutive failures without new authorization",
+      "Notice requirements before attempting account withdrawals",
+      "Record-keeping and compliance-program obligations"
+    ]
+  },
+  {
+    "id": "MORTSERV",
+    "title": "Mortgage Servicing Rules",
+    "cfr_reference": "12 U.S.C. § 2605, § 1639f",
+    "implementing_regulation": "Regulations X and Z (12 CFR 1024.30-41, 1026.41)",
+    "summary": "Sets servicer obligations for periodic statements, error resolution, and loss-mitigation handling.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Loss-mitigation evaluation procedures and dual-tracking limits",
+      "Periodic statements and prompt payment crediting",
+      "Timely response to notices of error and information requests"
+    ]
+  },
+  {
+    "id": "TRID",
+    "title": "TILA-RESPA Integrated Disclosure Rule",
+    "cfr_reference": "15 U.S.C. § 1601, 12 U.S.C. § 2601",
+    "implementing_regulation": "Regulation Z (12 CFR 1026.19(e),(f))",
+    "summary": "The 'Know Before You Owe' rule merging TILA and RESPA mortgage disclosures into the Loan Estimate and Closing Disclosure.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Loan Estimate within 3 business days of application",
+      "Closing Disclosure at least 3 business days before closing",
+      "Tolerance limits on how much certain fees may increase"
+    ]
+  },
+  {
+    "id": "ATRQM",
+    "title": "Ability-to-Repay / Qualified Mortgage Rule",
+    "cfr_reference": "15 U.S.C. § 1639c",
+    "implementing_regulation": "Regulation Z (12 CFR 1026.43)",
+    "summary": "Requires lenders to make a reasonable, good-faith determination that a borrower can repay a mortgage.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Verification of income, assets, debts, and obligations before origination",
+      "Qualified Mortgage safe harbor for loans meeting defined standards",
+      "Limits on risky features like interest-only and negative amortization for QMs"
+    ]
+  },
+  {
+    "id": "LOCOMP",
+    "title": "Loan Originator Compensation Rule",
+    "cfr_reference": "15 U.S.C. § 1639b",
+    "implementing_regulation": "Regulation Z (12 CFR 1026.36(d))",
+    "summary": "Bans compensating mortgage loan originators based on loan terms, to curb steering into costlier loans.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Originator pay may not vary with the interest rate or other loan terms",
+      "Anti-steering safe harbor requiring options to be presented",
+      "Qualification and identification requirements for originators"
+    ]
+  },
+  {
+    "id": "REGII",
+    "title": "Debit Card Interchange and Routing (Durbin Amendment)",
+    "cfr_reference": "15 U.S.C. § 1693o-2",
+    "implementing_regulation": "Regulation II (12 CFR Part 235)",
+    "summary": "Caps debit-card interchange fees for large issuers and requires multiple network-routing options for merchants.",
+    "applies_to": ["Checking or savings account", "Prepaid card"],
+    "key_provisions": [
+      "Interchange fee standard for issuers above the asset threshold",
+      "At least two unaffiliated networks must be available for routing",
+      "Bans network exclusivity and routing restrictions"
+    ]
+  },
+  {
+    "id": "TCPA",
+    "title": "Telephone Consumer Protection Act",
+    "cfr_reference": "47 U.S.C. § 227",
+    "implementing_regulation": "47 CFR § 64.1200 (FCC)",
+    "summary": "Restricts autodialed calls and texts, frequently invoked against debt collectors contacting consumers' cell phones.",
+    "applies_to": ["Debt collection", "Credit card"],
+    "key_provisions": [
+      "Prior express consent required for autodialed or prerecorded calls to cell phones",
+      "Revocation of consent must be honored",
+      "Statutory damages per violating call or text"
+    ]
+  },
+  {
+    "id": "BSA",
+    "title": "Bank Secrecy Act",
+    "cfr_reference": "31 U.S.C. § 5311",
+    "implementing_regulation": "31 CFR Chapter X (FinCEN)",
+    "summary": "Anti-money-laundering law requiring institutions to monitor and report suspicious activity; often the reason behind account freezes or closures.",
+    "applies_to": ["Checking or savings account", "Money transfer"],
+    "key_provisions": [
+      "Suspicious Activity Reports (SARs) and Currency Transaction Reports (CTRs)",
+      "Risk-based AML program and monitoring requirements",
+      "Recordkeeping for funds transfers and account activity"
+    ]
+  },
+  {
+    "id": "CIP",
+    "title": "Customer Identification Program (USA PATRIOT Act §326)",
+    "cfr_reference": "31 U.S.C. § 5318(l)",
+    "implementing_regulation": "31 CFR § 1020.220 (FinCEN)",
+    "summary": "Requires institutions to verify customer identity when opening accounts, the 'Know Your Customer' baseline.",
+    "applies_to": ["Checking or savings account", "Money transfer"],
+    "key_provisions": [
+      "Collect and verify name, date of birth, address, and identification number",
+      "Maintain records of the information used to verify identity",
+      "Check customers against government watchlists"
+    ]
+  },
+  {
+    "id": "RFPA",
+    "title": "Right to Financial Privacy Act",
+    "cfr_reference": "12 U.S.C. § 3401",
+    "implementing_regulation": "Enforced by federal agencies",
+    "summary": "Limits federal government access to consumers' financial records held by institutions, requiring notice or legal process.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "Government generally must provide notice and an opportunity to object",
+      "Requires a subpoena, summons, or warrant for record access",
+      "Recordkeeping of disclosures to government authorities"
+    ]
+  },
+  {
+    "id": "FTCACT5",
+    "title": "FTC Act Section 5 (Unfair or Deceptive Acts)",
+    "cfr_reference": "15 U.S.C. § 45",
+    "implementing_regulation": "Enforced by the FTC",
+    "summary": "Prohibits unfair or deceptive acts or practices in commerce; the FTC's general authority over non-bank financial actors.",
+    "applies_to": ["Debt collection", "Credit reporting", "Credit repair", "Debt or credit management"],
+    "key_provisions": [
+      "Deception: a material representation likely to mislead a reasonable consumer",
+      "Unfairness: substantial, unavoidable injury not outweighed by benefits",
+      "Basis for many FTC consumer-finance enforcement actions"
+    ]
+  },
+  {
+    "id": "CROA",
+    "title": "Credit Repair Organizations Act",
+    "cfr_reference": "15 U.S.C. § 1679",
+    "implementing_regulation": "Enforced by the CFPB and FTC",
+    "summary": "Regulates credit-repair companies, banning advance fees and false claims about improving credit.",
+    "applies_to": ["Credit repair", "Credit reporting", "Debt or credit management"],
+    "key_provisions": [
+      "No payment until promised services are fully performed",
+      "Written contract with a 3-day cancellation right",
+      "Bans misrepresenting what the organization can do for a consumer's credit"
+    ]
+  },
+  {
+    "id": "HOLDER",
+    "title": "FTC Holder in Due Course Rule",
+    "cfr_reference": "15 U.S.C. § 45",
+    "implementing_regulation": "16 CFR Part 433 (FTC)",
+    "summary": "Preserves a consumer's right to raise seller-related claims and defenses against any holder of the credit contract.",
+    "applies_to": ["Vehicle loan", "Personal loan"],
+    "key_provisions": [
+      "Required notice making assignees subject to the borrower's claims against the seller",
+      "Protects buyers when goods are defective or undelivered",
+      "Recovery limited to amounts already paid under the contract"
+    ]
+  },
+  {
+    "id": "CREDPRAC",
+    "title": "FTC Credit Practices Rule",
+    "cfr_reference": "15 U.S.C. § 45",
+    "implementing_regulation": "16 CFR Part 444 (FTC)",
+    "summary": "Bans certain unfair provisions in consumer credit contracts and requires a cosigner notice.",
+    "applies_to": ["Personal loan", "Vehicle loan"],
+    "key_provisions": [
+      "Prohibits confessions of judgment and certain wage-assignment clauses",
+      "Bans non-purchase-money security interests in household goods",
+      "Requires a clear written notice to cosigners of their liability"
+    ]
+  },
+  {
+    "id": "REDFLAGS",
+    "title": "Identity Theft Red Flags Rule",
+    "cfr_reference": "15 U.S.C. § 1681m(e)",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022, Subpart J)",
+    "summary": "Requires institutions with covered accounts to maintain a program to detect and respond to identity-theft warning signs.",
+    "applies_to": ["Credit card", "Checking or savings account", "Credit reporting"],
+    "key_provisions": [
+      "Written Identity Theft Prevention Program",
+      "Detection of 'red flags' indicating possible identity theft",
+      "Procedures to respond to and update for new threats"
+    ]
+  },
+  {
+    "id": "RISKPRICE",
+    "title": "Risk-Based Pricing Rule",
+    "cfr_reference": "15 U.S.C. § 1681m(h)",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022, Subpart H)",
+    "summary": "Requires a notice when a consumer receives credit on materially worse terms based on a credit report.",
+    "applies_to": ["Credit card", "Vehicle loan", "Mortgage"],
+    "key_provisions": [
+      "Risk-based pricing notice when worse terms result from report information",
+      "Credit-score-disclosure exception notices as an alternative",
+      "Lets consumers learn that their report affected their terms"
+    ]
+  },
+  {
+    "id": "DISPOSAL",
+    "title": "FCRA Disposal Rule",
+    "cfr_reference": "15 U.S.C. § 1681w",
+    "implementing_regulation": "Regulation V (16 CFR Part 682 / 12 CFR Part 1022)",
+    "summary": "Requires proper disposal of consumer-report information to prevent unauthorized access and identity theft.",
+    "applies_to": ["Credit reporting"],
+    "key_provisions": [
+      "Reasonable measures to dispose of consumer-report data",
+      "Covers paper shredding and secure electronic destruction",
+      "Applies to anyone who maintains consumer-report information"
+    ]
+  },
+  {
+    "id": "AFFILIATE",
+    "title": "FCRA Affiliate Marketing Rule",
+    "cfr_reference": "15 U.S.C. § 1681s-3",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022, Subpart C)",
+    "summary": "Gives consumers the right to opt out of affiliates using shared information to market to them.",
+    "applies_to": ["Credit card", "Credit reporting"],
+    "key_provisions": [
+      "Opt-out notice before affiliates use shared eligibility information for marketing",
+      "Opt-out effective for at least five years",
+      "Clear and conspicuous disclosure requirements"
+    ]
+  },
+  {
+    "id": "FURNISHER",
+    "title": "FCRA Furnisher Accuracy and Dispute Rule",
+    "cfr_reference": "15 U.S.C. § 1681s-2",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022, Subpart E)",
+    "summary": "Sets accuracy and dispute-investigation duties for companies that furnish account data to credit bureaus.",
+    "applies_to": ["Credit reporting", "Debt collection"],
+    "key_provisions": [
+      "Duty to furnish accurate information and correct known errors",
+      "Investigate direct and indirect (bureau-routed) disputes",
+      "Reasonable written policies to ensure data accuracy and integrity"
+    ]
+  },
+  {
+    "id": "HEA",
+    "title": "Higher Education Act",
+    "cfr_reference": "20 U.S.C. § 1070 et seq.",
+    "implementing_regulation": "34 CFR (U.S. Dept. of Education)",
+    "summary": "Governs federal student-aid programs, including servicing standards, income-driven repayment, and borrower-defense discharge.",
+    "applies_to": ["Student loan"],
+    "key_provisions": [
+      "Income-driven repayment and loan-consolidation options",
+      "Borrower-defense and closed-school discharge rights",
+      "Servicing and disclosure standards for federal loans"
+    ]
+  },
+  {
+    "id": "FLOOD",
+    "title": "Flood Disaster Protection Act",
+    "cfr_reference": "42 U.S.C. § 4012a",
+    "implementing_regulation": "Interagency flood-insurance rules",
+    "summary": "Requires flood insurance on mortgaged property in special flood-hazard areas and governs lender escrow and notice duties.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Mandatory flood insurance for loans secured by property in flood zones",
+      "Notice to borrowers of flood-hazard status",
+      "Escrow of flood-insurance premiums and force-placement rules"
+    ]
+  },
+  {
+    "id": "AMTPA",
+    "title": "Alternative Mortgage Transaction Parity Act",
+    "cfr_reference": "12 U.S.C. § 3801",
+    "implementing_regulation": "Regulation D (12 CFR Part 1004)",
+    "summary": "Permits state-chartered lenders to offer adjustable-rate and other alternative mortgages under federal parity standards.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Parity for variable-rate and balloon mortgage structures",
+      "Applies CFPB disclosure standards to covered alternative mortgages",
+      "Limits which federal rules preempt state restrictions"
+    ]
+  },
+  {
+    "id": "GARNISH",
+    "title": "Garnishment of Federal Benefit Payments Rule",
+    "cfr_reference": "31 U.S.C. § 3335",
+    "implementing_regulation": "31 CFR Part 212",
+    "summary": "Protects exempt federal benefit deposits (e.g., Social Security) from being frozen or garnished by creditors.",
+    "applies_to": ["Checking or savings account", "Debt collection"],
+    "key_provisions": [
+      "Banks must perform a lookback to protect recent federal-benefit deposits",
+      "Protected amount must remain accessible despite a garnishment order",
+      "Notice to the account holder when a garnishment is received"
+    ]
+  },
+  {
+    "id": "OVERDRAFT",
+    "title": "Regulation E Overdraft Opt-In Rule",
+    "cfr_reference": "15 U.S.C. § 1693 et seq.",
+    "implementing_regulation": "Regulation E (12 CFR § 1005.17)",
+    "summary": "Requires consumers to affirmatively opt in before a bank may charge overdraft fees on ATM and one-time debit transactions.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "No overdraft fees on ATM/one-time debit without prior opt-in",
+      "Standardized opt-in disclosure describing the service and fees",
+      "Right to revoke the opt-in at any time"
+    ]
+  },
+  {
+    "id": "CFPA",
+    "title": "Consumer Financial Protection Act (Dodd-Frank Title X)",
+    "cfr_reference": "12 U.S.C. § 5481 et seq.",
+    "implementing_regulation": "Administered by the CFPB",
+    "summary": "Established the CFPB and its supervisory, rulemaking, and enforcement authority over consumer financial products and services.",
+    "applies_to": ["Mortgage", "Credit card", "Debt collection", "Credit reporting", "Checking or savings account", "Student loan"],
+    "key_provisions": [
+      "Defines covered persons and service providers under CFPB jurisdiction",
+      "Authority to supervise banks and larger nonbank participants",
+      "Foundation for the CFPB's UDAAP and rulemaking power"
+    ]
+  },
+  {
+    "id": "SAFEGUARDS",
+    "title": "GLBA Safeguards Rule",
+    "cfr_reference": "15 U.S.C. § 6801",
+    "implementing_regulation": "16 CFR Part 314 (FTC)",
+    "summary": "Requires financial institutions to develop and maintain an information-security program protecting customer data.",
+    "applies_to": ["Checking or savings account", "Mortgage", "Credit card", "Credit reporting"],
+    "key_provisions": [
+      "Written information-security program with a qualified individual in charge",
+      "Risk assessment, access controls, and encryption of customer data",
+      "Incident-response plan and vendor-oversight requirements"
+    ]
+  },
+  {
+    "id": "PRIVED",
+    "title": "Private Education Loan Disclosures (TILA)",
+    "cfr_reference": "15 U.S.C. § 1638(e)",
+    "implementing_regulation": "Regulation Z (12 CFR 1026.46-48)",
+    "summary": "Sets special disclosure and timing rules for private student loans, distinct from federal student aid.",
+    "applies_to": ["Student loan"],
+    "key_provisions": [
+      "Application, approval, and final disclosures at defined stages",
+      "30-day acceptance window and 3-day right to cancel before disbursement",
+      "Self-certification form confirming cost of attendance"
+    ]
+  },
+  {
+    "id": "REGD_SAVINGS",
+    "title": "Regulation D (Reserve Requirements / Savings Transfers)",
+    "cfr_reference": "12 U.S.C. § 461",
+    "implementing_regulation": "Regulation D (12 CFR Part 204, Federal Reserve)",
+    "summary": "Defines deposit-account categories; historically limited certain convenient transfers from savings accounts to six per month.",
+    "applies_to": ["Checking or savings account"],
+    "key_provisions": [
+      "Distinguishes transaction accounts from savings deposits",
+      "Historic six-per-month limit on certain savings transfers (suspended in 2020)",
+      "Underlies fees and restrictions some banks still apply to savings"
+    ]
+  },
+  {
+    "id": "OFAC",
+    "title": "OFAC Economic Sanctions",
+    "cfr_reference": "50 U.S.C. § 1701 (IEEPA)",
+    "implementing_regulation": "31 CFR Chapter V (OFAC)",
+    "summary": "Requires institutions to block or reject transactions involving sanctioned parties or countries; a common reason for held or returned transfers.",
+    "applies_to": ["Money transfer", "Checking or savings account"],
+    "key_provisions": [
+      "Screening against the Specially Designated Nationals (SDN) list",
+      "Blocking or rejecting prohibited transactions",
+      "Mandatory reporting of blocked and rejected transactions"
+    ]
+  },
+  {
+    "id": "GIFTCARD",
+    "title": "Gift Card Rules (CARD Act)",
+    "cfr_reference": "15 U.S.C. § 1693l-1",
+    "implementing_regulation": "Regulation E (12 CFR § 1005.20)",
+    "summary": "Protects holders of gift cards and certain prepaid cards from short expiration dates and surprise dormancy fees.",
+    "applies_to": ["Prepaid card"],
+    "key_provisions": [
+      "Funds may not expire for at least five years from the date loaded",
+      "Limits on dormancy and inactivity fees, with disclosure",
+      "Clear disclosure of fees and expiration on the card or packaging"
+    ]
+  },
+  {
+    "id": "CARES",
+    "title": "CARES Act Credit Reporting Protections",
+    "cfr_reference": "15 U.S.C. § 1681s-2(a)(1)(F)",
+    "implementing_regulation": "FCRA amendment (2020)",
+    "summary": "Requires furnishers that grant a pandemic-related accommodation to report the account as current if the consumer meets the terms.",
+    "applies_to": ["Mortgage", "Student loan", "Credit reporting"],
+    "key_provisions": [
+      "Accounts under an accommodation reported as current if not already delinquent",
+      "Applies to forbearance and modified-payment arrangements",
+      "Protects credit standing during qualifying hardships"
+    ]
+  },
+  {
+    "id": "PTFA",
+    "title": "Protecting Tenants at Foreclosure Act",
+    "cfr_reference": "Pub. L. 111-22 (12 U.S.C. § 5220 note)",
+    "implementing_regulation": "Enforced by the CFPB",
+    "summary": "Protects bona fide tenants in foreclosed properties by giving them notice and time before eviction.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Bona fide leases generally survive foreclosure",
+      "At least 90 days' notice to vacate for tenants",
+      "Successor owner takes title subject to the existing tenancy"
+    ]
+  },
+  {
+    "id": "APPRAISAL",
+    "title": "Appraisal Independence Requirements",
+    "cfr_reference": "15 U.S.C. § 1639e",
+    "implementing_regulation": "Regulation Z (12 CFR § 1026.42)",
+    "summary": "Protects the independence of mortgage appraisers and requires consumers receive copies of valuations.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Bans coercion or pressure to influence an appraiser's valuation",
+      "Requires copies of appraisals be provided to applicants",
+      "Customary-and-reasonable compensation for fee appraisers"
+    ]
+  },
+  {
+    "id": "MEDDEBT",
+    "title": "Medical Debt Credit Reporting Rule",
+    "cfr_reference": "15 U.S.C. § 1681b",
+    "implementing_regulation": "Regulation V (12 CFR Part 1022)",
+    "summary": "CFPB rule restricting the inclusion and use of medical debt information in consumer credit reports and lending decisions.",
+    "applies_to": ["Credit reporting", "Debt collection"],
+    "key_provisions": [
+      "Limits reporting of covered medical debts on consumer reports",
+      "Restricts creditor reliance on medical-debt information",
+      "Aims to reduce errors and coercive medical-billing collection"
+    ]
+  },
+  {
+    "id": "HPML",
+    "title": "Higher-Priced Mortgage Loan Escrow Rule",
+    "cfr_reference": "15 U.S.C. § 1639d",
+    "implementing_regulation": "Regulation Z (12 CFR § 1026.35)",
+    "summary": "Requires escrow accounts and an appraisal for higher-priced (subprime-range) mortgage loans.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Mandatory escrow for taxes and insurance for a minimum period",
+      "Written appraisal with physical inspection for covered loans",
+      "Additional appraisal for certain quick 'flipped' resales"
+    ]
+  },
+  {
+    "id": "TSR",
+    "title": "FTC Telemarketing Sales Rule",
+    "cfr_reference": "15 U.S.C. § 6101",
+    "implementing_regulation": "16 CFR Part 310 (FTC)",
+    "summary": "Regulates telemarketing, including debt-relief services, with an advance-fee ban for debt settlement.",
+    "applies_to": ["Debt collection", "Credit repair", "Debt or credit management"],
+    "key_provisions": [
+      "No advance fees for debt-relief services until a debt is settled",
+      "Mandatory disclosures and bans on misrepresentations",
+      "Do-Not-Call and calling-time restrictions"
+    ]
+  },
+  {
+    "id": "ILSA",
+    "title": "Interstate Land Sales Full Disclosure Act",
+    "cfr_reference": "15 U.S.C. § 1701",
+    "implementing_regulation": "Regulation J (12 CFR Part 1010)",
+    "summary": "Requires disclosures in the interstate sale of subdivided land to protect buyers from fraud.",
+    "applies_to": ["Mortgage"],
+    "key_provisions": [
+      "Property Report disclosure before a purchase agreement is signed",
+      "Buyer rescission rights within defined periods",
+      "Anti-fraud provisions for covered land sales"
+    ]
+  },
+  {
+    "id": "LATEFEE",
+    "title": "Credit Card Penalty Fees Rule",
+    "cfr_reference": "15 U.S.C. § 1665d",
+    "implementing_regulation": "Regulation Z (12 CFR § 1026.52)",
+    "summary": "CFPB rule limiting the safe-harbor amount large card issuers may charge for late payments.",
+    "applies_to": ["Credit card"],
+    "key_provisions": [
+      "Lower safe-harbor late-fee amount for larger card issuers",
+      "Late fees must be reasonable and proportional to costs",
+      "Issuers may exceed the safe harbor only with a cost-justification analysis"
     ]
   }
 ]
