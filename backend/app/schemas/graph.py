@@ -9,6 +9,8 @@ consumer, not for Neo4j's internal record format.
 
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
 
 
@@ -52,3 +54,15 @@ class ResolutionPattern(BaseModel):
         default=None,
         description="How many times the queried company used this pattern (None if no company scope).",
     )
+
+
+class GraphNeighborhood(BaseModel):
+    """A bounded subgraph around a node, shaped for a visualization library.
+
+    The inner node/edge dicts are intentionally loose: their props vary by
+    label and the frontend renders them generically, so we pin the top-level
+    shape (nodes + edges) without over-constraining each element.
+    """
+
+    nodes: list[dict[str, Any]] = Field(default_factory=list)
+    edges: list[dict[str, Any]] = Field(default_factory=list)
