@@ -14,7 +14,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.complaint import ComplaintStatus
+from app.models.complaint import Complaint, ComplaintStatus
 
 
 class ComplaintCreate(BaseModel):
@@ -58,6 +58,59 @@ class ComplaintListResponse(BaseModel):
     """Paginated list of complaints."""
 
     items: list[ComplaintPublic]
+    total: int
+    limit: int
+    offset: int
+
+
+QUEUE_PREVIEW_CHARS = 200
+
+
+class ComplaintQueueItem(BaseModel):
+    """Lean triage-queue row.
+
+    The queue is a table view — shipping each row's full narrative (up to
+    20K chars) just to render 50 table rows wastes most of the payload, so
+    this carries a preview and the detail page fetches the rest by id.
+    """
+
+    id: uuid.UUID
+    company: str | None
+    product: str | None
+    issue: str | None
+    state: str | None
+    status: ComplaintStatus
+    sentiment: str | None
+    intent: str | None
+    urgency: int | None
+    priority_score: float | None
+    narrative_preview: str
+    date_received: datetime | None
+    created_at: datetime
+
+    @classmethod
+    def from_complaint(cls, complaint: Complaint) -> ComplaintQueueItem:
+        return cls(
+            id=complaint.id,
+            company=complaint.company,
+            product=complaint.product,
+            issue=complaint.issue,
+            state=complaint.state,
+            status=complaint.status,
+            sentiment=complaint.sentiment,
+            intent=complaint.intent,
+            urgency=complaint.urgency,
+            priority_score=complaint.priority_score,
+            narrative_preview=complaint.narrative[:QUEUE_PREVIEW_CHARS],
+            date_received=complaint.date_received,
+            created_at=complaint.created_at,
+        )
+
+
+class ComplaintQueueResponse(BaseModel):
+    """Priority-ordered triage queue page."""
+
+    items: list[ComplaintQueueItem]
     total: int
     limit: int
     offset: int
