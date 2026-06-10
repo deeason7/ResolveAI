@@ -133,8 +133,13 @@ class LLMClient:
         messages: list[dict[str, str]],
         *,
         max_retries: int | None = None,
+        temperature: float = 0.0,
     ) -> LLMResponse[T]:
         """Return a validated ``response_model`` from the first healthy provider.
+
+        ``temperature`` defaults to 0.0 — classification and judging want
+        determinism. Callers that need a warmer model (the tone judge runs at
+        0.1 per spec) override it per call.
 
         Raises:
             LLMUnavailableError: if every provider in the chain failed.
@@ -143,7 +148,14 @@ class LLMClient:
         last_error: Exception | None = None
         for idx, cfg in enumerate(self._chain):
             try:
-                return self._attempt(cfg, response_model, messages, retries, is_fallback=idx > 0)
+                return self._attempt(
+                    cfg,
+                    response_model,
+                    messages,
+                    retries,
+                    is_fallback=idx > 0,
+                    temperature=temperature,
+                )
             except (
                 APIConnectionError,
                 APITimeoutError,
@@ -169,6 +181,7 @@ class LLMClient:
         retries: int,
         *,
         is_fallback: bool,
+        temperature: float,
     ) -> LLMResponse[T]:
         client = self._clients[cfg.provider]
         started = time.perf_counter()
@@ -177,7 +190,7 @@ class LLMClient:
             messages=messages,
             response_model=response_model,
             max_retries=retries,
-            temperature=0.0,  # deterministic: classification is not creative
+            temperature=temperature,
         )
         latency_ms = int((time.perf_counter() - started) * 1000)
 
