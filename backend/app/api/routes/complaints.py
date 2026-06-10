@@ -2,6 +2,7 @@
 Complaint endpoints:
 
   GET    /complaints/             — paginated list with filters
+  GET    /complaints/queue        — priority-sorted triage queue
   GET    /complaints/{id}         — fetch one
   POST   /complaints/             — user submits a new complaint
   POST   /complaints/bulk-import  — admin-only CSV ingest (server-side path)
@@ -33,6 +34,8 @@ from app.schemas.complaint import (
     ComplaintCreate,
     ComplaintListResponse,
     ComplaintPublic,
+    ComplaintQueueItem,
+    ComplaintQueueResponse,
 )
 from app.services.data_ingestion import ingest_cfpb_csv
 from app.workers.classification_worker import enqueue_complaint
@@ -78,6 +81,83 @@ async def list_complaints(
 
     return ComplaintListResponse(
         items=[ComplaintPublic.model_validate(c) for c in rows],
+        total=total,
+        limit=limit,
+        offset=offset,
+    )
+
+
+# Statuses a reviewer can act on. pending rows have no classification yet and
+# resolved rows are done — neither belongs in a "needs attention" queue.
+ACTIONABLE_STATUSES = (
+    ComplaintStatus.classified,
+    ComplaintStatus.escalated,
+    ComplaintStatus.agent_triggered,
+    ComplaintStatus.draft_ready,
+    ComplaintStatus.needs_review,
+)
+
+
+# NOTE: declared before /{complaint_id} — route matching is declaration-order,
+# and the path-param route would otherwise swallow "queue" as a (bad) UUID.
+@router.get("/queue", response_model=ComplaintQueueResponse)
+async def triage_queue(
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+    status_: ComplaintStatus | None = Query(default=None, alias="status"),
+    sentiment: str | None = Query(default=None, max_length=50),
+    urgency_min: int | None = Query(default=None, ge=1, le=5),
+    urgency_max: int | None = Query(default=None, ge=1, le=5),
+    product: str | None = Query(default=None, max_length=255),
+    company: str | None = Query(default=None, max_length=255),
+    limit: int = Query(default=50, ge=1, le=200),
+    offset: int = Query(default=0, ge=0),
+) -> ComplaintQueueResponse:
+    """Triage queue: highest-priority complaints first.
+
+    Order is priority_score desc, then urgency desc, then oldest-first as the
+    tiebreak (two equally urgent complaints shouldn't queue-jump by recency).
+    NULLS LAST is explicit because Postgres sorts nulls first on desc and
+    SQLite sorts them last — without it, prod would lead with unscored rows
+    while tests happily passed.
+    """
+    if urgency_min is not None and urgency_max is not None and urgency_min > urgency_max:
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            detail="urgency_min cannot exceed urgency_max",
+        )
+
+    conditions = []
+    if status_ is not None:
+        conditions.append(Complaint.status == status_)
+    else:
+        conditions.append(Complaint.status.in_(ACTIONABLE_STATUSES))
+    if sentiment is not None:
+        conditions.append(Complaint.sentiment == sentiment)
+    if urgency_min is not None:
+        conditions.append(Complaint.urgency >= urgency_min)
+    if urgency_max is not None:
+        conditions.append(Complaint.urgency <= urgency_max)
+    if product is not None:
+        conditions.append(Complaint.product == product)
+    if company is not None:
+        conditions.append(Complaint.company == company)
+
+    count_stmt = select(func.count(Complaint.id))
+    queue_stmt = select(Complaint).order_by(
+        Complaint.priority_score.desc().nulls_last(),
+        Complaint.urgency.desc().nulls_last(),
+        Complaint.created_at.asc(),
+    )
+    for cond in conditions:
+        count_stmt = count_stmt.where(cond)
+        queue_stmt = queue_stmt.where(cond)
+
+    total = (await session.exec(count_stmt)).one()
+    rows = (await session.exec(queue_stmt.offset(offset).limit(limit))).all()
+
+    return ComplaintQueueResponse(
+        items=[ComplaintQueueItem.from_complaint(c) for c in rows],
         total=total,
         limit=limit,
         offset=offset,
