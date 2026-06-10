@@ -111,6 +111,8 @@ services:
     env_file: .env
     ports:
       - "8511:8501"
+    volumes:
+      - ./frontend:/app    # hot-reload in dev, same as the api service
     depends_on:
       api:
         condition: service_healthy
