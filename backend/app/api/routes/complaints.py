@@ -17,12 +17,13 @@ import logging
 import uuid
 from pathlib import Path
 
+import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.deps import get_current_user, require_admin
+from app.core.deps import get_current_user, get_redis, require_admin
 from app.database import get_session
 from app.models.complaint import Complaint, ComplaintStatus
 from app.models.user import User
@@ -34,6 +35,7 @@ from app.schemas.complaint import (
     ComplaintPublic,
 )
 from app.services.data_ingestion import ingest_cfpb_csv
+from app.workers.classification_worker import enqueue_complaint
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -99,9 +101,15 @@ async def get_complaint(
 async def submit_complaint(
     body: ComplaintCreate,
     session: AsyncSession = Depends(get_session),
+    redis: aioredis.Redis = Depends(get_redis),
     _: User = Depends(get_current_user),
 ) -> ComplaintPublic:
-    """Submit a new complaint. Goes into status=pending until the classifier picks it up."""
+    """Submit a new complaint and queue it for classification.
+
+    The enqueue is best-effort: status=pending is the durable signal, so a
+    Redis hiccup must not lose the submission — a sweep can re-enqueue pending
+    complaints later, exactly like the other recoverable side-channels.
+    """
     complaint = Complaint(
         narrative=body.narrative,
         product=body.product,
@@ -114,6 +122,10 @@ async def submit_complaint(
     session.add(complaint)
     await session.flush()
     await session.refresh(complaint)
+    try:
+        await enqueue_complaint(redis, complaint.id)
+    except Exception:
+        logger.exception("classification enqueue failed; %s stays pending", complaint.id)
     logger.info("Complaint submitted: %s", complaint.id)
     return ComplaintPublic.model_validate(complaint)
 
