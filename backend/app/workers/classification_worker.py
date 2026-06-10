@@ -44,6 +44,7 @@ from app.services.embedder import embed_text
 from app.services.graph_store import GraphStore, get_default_graph_store
 from app.services.llmops_tracker import LLMOpsTracker
 from app.services.vector_store import VectorStore, get_default_store
+from app.workers.resolution_worker import enqueue_resolution
 
 logger = logging.getLogger(__name__)
 
@@ -238,18 +239,37 @@ class ClassificationWorker:
                 complaint_id,
             )
         if high:
-            # Phase 4 hook: a resolution agent will consume escalated complaints.
-            # Until that exists, the `escalated` status is the durable signal.
+            await self._trigger_resolution(complaint_id, cls)
+
+        await self._index(complaint_id, complaint.narrative, complaint, cls)
+        await self._update_graph(complaint)
+
+    async def _trigger_resolution(self, complaint_id: uuid.UUID, cls: Any) -> None:
+        """Best-effort: hand the escalated complaint to the resolution agent.
+
+        Postgres has already committed status=escalated, and THAT is the durable
+        signal — if this XADD fails, a sweep can re-enqueue every escalated
+        complaint, exactly like a stale Qdrant index is rebuilt by the backfill.
+        Raising here would redeliver the classification message and re-run a
+        multi-second LLM call to redo work that's already committed.
+        """
+        try:
+            await enqueue_resolution(
+                self.redis, complaint_id, stream=self.settings.resolution_queue
+            )
             logger.info(
-                "complaint %s is high-priority (urgency=%d sentiment=%s) — flagged "
+                "complaint %s is high-priority (urgency=%d sentiment=%s) — queued "
                 "for resolution agent",
                 complaint_id,
                 cls.urgency,
                 cls.sentiment,
             )
-
-        await self._index(complaint_id, complaint.narrative, complaint, cls)
-        await self._update_graph(complaint)
+        except Exception:
+            logger.exception(
+                "failed to enqueue %s for resolution (status=escalated is durable; "
+                "re-enqueue via sweep)",
+                complaint_id,
+            )
 
     async def _index(
         self,

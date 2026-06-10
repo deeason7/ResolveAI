@@ -24,6 +24,7 @@ class Settings(BaseSettings):
     # Redis
     redis_url: str
     classification_queue: str = "classification:queue"
+    resolution_queue: str = "resolution:queue"
 
     # Qdrant
     qdrant_host: str = "qdrant"

@@ -9,11 +9,14 @@ FastAPI injects it automatically — the route itself never touches JWT logic.
 
 import logging
 import uuid
+from functools import lru_cache
 
+import redis.asyncio as aioredis
 from fastapi import Depends, HTTPException, status
 from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.config import settings
 from app.core.security import decode_access_token
 from app.database import get_session
 from app.models.user import User, UserRole
@@ -76,3 +79,19 @@ def get_graph_store() -> GraphStore:
     app.dependency_overrides[get_graph_store] without monkeypatching the module.
     """
     return get_default_graph_store()
+
+
+@lru_cache
+def get_default_redis() -> aioredis.Redis:
+    """Process-wide Redis client (connection pool included).
+
+    Routes only produce to streams (XADD), so one shared client is plenty.
+    Lives here rather than a service module because there's no domain logic to
+    wrap — it IS just the client. Closed by the app's lifespan on shutdown.
+    """
+    return aioredis.from_url(settings.redis_url, decode_responses=True)
+
+
+def get_redis() -> aioredis.Redis:
+    """Depends() seam over the Redis singleton; override in tests with fakeredis."""
+    return get_default_redis()

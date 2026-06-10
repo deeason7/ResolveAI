@@ -119,6 +119,8 @@ class ResolutionAgent:
         llm_client: LLMClient | None = None,
         guardrails: GuardrailValidator | None = None,
         max_retries: int = DEFAULT_MAX_RETRIES,
+        initial_feedback: str | None = None,
+        previous_draft_text: str | None = None,
     ) -> None:
         self.complaint = complaint
         self.classification = classification
@@ -128,6 +130,12 @@ class ResolutionAgent:
         # Default to a pass-through until the Day 21-22 engine is wired in.
         self.guardrails: GuardrailValidator = guardrails or NullGuardrail()
         self.max_attempts = max_retries + 1
+        # Human-reject path: seed attempt 1 as a regeneration over the rejected
+        # draft, so the reviewer's feedback reaches the model the same way
+        # guardrail feedback does. Both must be present to take effect (the
+        # regeneration prompt quotes the previous draft).
+        self.initial_feedback = initial_feedback or ""
+        self.previous_draft_text = previous_draft_text
 
     async def run(self) -> AgentResult:
         """Execute the full pipeline and return a persistable result."""
@@ -204,7 +212,7 @@ class ResolutionAgent:
         """Draft, validate, and regenerate up to ``max_attempts`` times."""
         llm_calls: list[DraftOutcome] = []
         judge_calls: list[JudgeCallMetadata] = []
-        feedback = ""
+        feedback = self.initial_feedback
         last_draft: DraftedResponse | None = None
         last_guardrail: GuardrailOutcome | None = None
 
@@ -214,7 +222,9 @@ class ResolutionAgent:
                     draft_input,
                     llm_client=self.llm_client,
                     feedback=feedback or None,
-                    previous_draft=last_draft.response_text if last_draft else None,
+                    previous_draft=(
+                        last_draft.response_text if last_draft else self.previous_draft_text
+                    ),
                 )
             except LLMUnavailableError as exc:
                 logger.error("draft attempt %d: all providers down: %s", attempt, exc)

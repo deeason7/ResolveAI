@@ -64,10 +64,16 @@ async def client():
                 await s.rollback()
                 raise
 
+    from app.core.deps import get_redis
     from app.main import create_app
 
     test_app = create_app()
     test_app.dependency_overrides[get_session] = override_session
+    # Routes that produce to streams (complaint submit, resolution trigger) get
+    # the same shared-server fakeredis the auth blocklist patch uses. Zero-arg
+    # lambda on purpose: FastAPI introspects the override's signature, and a
+    # (*args, **kwargs) factory would become two required query params.
+    test_app.dependency_overrides[get_redis] = lambda: _make_fake_redis()
 
     with patch("app.api.routes.auth.aioredis.from_url", side_effect=_make_fake_redis):
         async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:

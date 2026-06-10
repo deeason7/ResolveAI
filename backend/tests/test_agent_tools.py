@@ -440,3 +440,33 @@ class TestResolutionAgent:
         assert called["regs"] is False  # no product -> tool skipped
         assert called["company"] is False  # no company -> tool skipped
         assert res.status == STATUS_PASSED
+
+    async def test_reject_revision_seeds_feedback_and_previous_draft(self, monkeypatch):
+        # Human-reject path: attempt 1 must already be a regeneration pass over
+        # the rejected draft, carrying the reviewer's feedback.
+        _stub_context(monkeypatch)
+        captured: dict = {}
+
+        async def _capture(inp, *, llm_client=None, feedback=None, previous_draft=None):
+            captured["feedback"] = feedback
+            captured["previous_draft"] = previous_draft
+            return DraftOutcome(
+                drafted=_draft(),
+                provider="groq",
+                model="m",
+                prompt_tokens=1,
+                completion_tokens=1,
+                latency_ms=1,
+                is_fallback=False,
+            )
+
+        monkeypatch.setattr(orch, "draft_response", _capture)
+        res = await ResolutionAgent(
+            _complaint(),
+            _classification(),
+            initial_feedback="Mention the CFPB dispute portal explicitly.",
+            previous_draft_text="Dear customer, we looked into it.",
+        ).run()
+        assert res.status == STATUS_PASSED
+        assert captured["feedback"] == "Mention the CFPB dispute portal explicitly."
+        assert captured["previous_draft"] == "Dear customer, we looked into it."
