@@ -130,6 +130,19 @@ class TestStructured:
         with pytest.raises(LLMUnavailableError):
             c.structured(_Dummy, [{"role": "user", "content": "hi"}])
 
+    def test_temperature_defaults_to_deterministic(self):
+        fake = _FakeClient(result=(_Dummy(x=1), _completion()))
+        c = _client_with(ollama=fake, groq_key="")
+        c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert fake.chat.completions.calls[0]["temperature"] == 0.0
+
+    def test_temperature_override_reaches_provider(self):
+        # The tone judge runs at 0.1; the override must reach the actual call.
+        fake = _FakeClient(result=(_Dummy(x=1), _completion()))
+        c = _client_with(ollama=fake, groq_key="")
+        c.structured(_Dummy, [{"role": "user", "content": "hi"}], temperature=0.1)
+        assert fake.chat.completions.calls[0]["temperature"] == 0.1
+
 
 class TestSingleton:
     def test_get_llm_client_is_cached_until_reset(self):

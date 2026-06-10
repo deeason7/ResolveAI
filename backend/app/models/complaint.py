@@ -9,10 +9,22 @@ from sqlmodel import Field, SQLModel
 
 
 class ComplaintStatus(str, Enum):
+    """Lifecycle of a complaint. Stored as VARCHAR(50), so adding a value here
+    is a code change, not a migration.
+
+    pending -> classified                       (low priority: stops here)
+            -> escalated -> agent_triggered -> draft_ready  (guardrails passed)
+                                            -> needs_review (agent failed/down)
+    draft_ready -> resolved (human approves) or agent_triggered (human rejects)
+    """
+
     pending = "pending"
     classified = "classified"
-    resolved = "resolved"
-    escalated = "escalated"
+    escalated = "escalated"  # high priority: queued for the resolution agent
+    agent_triggered = "agent_triggered"  # resolution agent is working on it
+    draft_ready = "draft_ready"  # guardrail-passed draft awaiting human review
+    needs_review = "needs_review"  # agent failed or unavailable; human takes over
+    resolved = "resolved"  # human approved a resolution; case closed
 
 
 class Complaint(SQLModel, table=True):

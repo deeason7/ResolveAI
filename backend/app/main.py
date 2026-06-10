@@ -16,8 +16,9 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import auth, complaints, graph
+from app.api.routes import auth, complaints, graph, resolutions
 from app.config import settings
+from app.core.deps import get_default_redis
 from app.middleware.rate_limit import limiter
 from app.services.graph_store import get_default_graph_store
 
@@ -43,6 +44,9 @@ async def lifespan(app: FastAPI):
     if get_default_graph_store.cache_info().currsize:
         await get_default_graph_store().close()
         logger.info("closed Neo4j driver")
+    if get_default_redis.cache_info().currsize:
+        await get_default_redis().aclose()
+        logger.info("closed Redis client")
 
 
 def create_app() -> FastAPI:
@@ -77,6 +81,7 @@ def create_app() -> FastAPI:
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(complaints.router, prefix="/api/v1")
     app.include_router(graph.router, prefix="/api/v1")
+    app.include_router(resolutions.router, prefix="/api/v1")
 
     @app.get("/api/v1/health", tags=["infra"])
     async def health() -> dict:

@@ -110,6 +110,19 @@ class TestSubmit:
         assert r.status_code == 201
         assert r.json()["state"] == "NY"
 
+    async def test_submit_enqueues_for_classification(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        from app.config import settings
+        from tests.conftest import _make_fake_redis
+
+        r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(analyst_token))
+        assert r.status_code == 201
+        cid = r.json()["id"]
+        # Same FakeServer as the app's overridden client — read the stream back.
+        entries = await _make_fake_redis().xrange(settings.classification_queue)
+        assert any(fields["complaint_id"] == cid for _id, fields in entries)
+
 
 # ── get by id ─────────────────────────────────────────────────────────────────
 
