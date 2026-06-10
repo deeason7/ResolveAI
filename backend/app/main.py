@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import auth, complaints, graph, resolutions
+from app.api.routes import analytics, auth, complaints, graph, resolutions
 from app.config import settings
 from app.core.deps import get_default_redis
 from app.middleware.rate_limit import limiter
@@ -80,6 +80,7 @@ def create_app() -> FastAPI:
     # Routers
     app.include_router(auth.router, prefix="/api/v1")
     app.include_router(complaints.router, prefix="/api/v1")
+    app.include_router(analytics.router, prefix="/api/v1")
     app.include_router(graph.router, prefix="/api/v1")
     app.include_router(resolutions.router, prefix="/api/v1")
 
