@@ -36,6 +36,7 @@ from app.schemas.agent import (
     SearchPrecedentsInput,
 )
 from app.schemas.classification import ComplaintClassification
+from app.schemas.guardrails import GuardrailOutcome, GuardrailViolation, JudgeCallMetadata
 from app.services.agent.tools import (
     DraftOutcome,
     check_company_history,
@@ -57,19 +58,13 @@ STATUS_FAILED = "failed"  # exhausted retries; needs human review
 STATUS_UNAVAILABLE = "unavailable"  # no model output at all; needs human review
 
 
-@dataclass
-class GuardrailOutcome:
-    """Result of validating one draft. ``feedback`` is fed into regeneration."""
-
-    passed: bool
-    feedback: str = ""
-
-
 class GuardrailValidator(Protocol):
-    """The seam the Day 21-22 GuardrailEngine implements.
+    """The seam ``services.guardrails.GuardrailEngine`` implements.
 
     Async because the real engine's tone layer is an LLM call; the programmatic
-    layers simply don't await anything.
+    layers simply don't await anything. ``GuardrailOutcome`` lives in
+    ``schemas.guardrails`` (it is also the persistence shape) and is re-exported
+    here so the consumer-side seam stays importable from one place.
     """
 
     async def validate(
@@ -88,14 +83,22 @@ class NullGuardrail:
 
 @dataclass
 class AgentResult:
-    """What ``run()`` returns; the worker turns this into DB rows."""
+    """What ``run()`` returns; the worker turns this into DB rows.
+
+    ``llm_calls`` are drafting calls; ``judge_calls`` are tone-check calls —
+    kept separate because the LLMOps tracker logs them under different
+    operations with different cost profiles.
+    """
 
     drafted: DraftedResponse | None
     status: str
     reasoning_steps: list[str] = field(default_factory=list)
     llm_calls: list[DraftOutcome] = field(default_factory=list)
+    judge_calls: list[JudgeCallMetadata] = field(default_factory=list)
     attempts: int = 0
     guardrail_feedback: str = ""
+    guardrail_violations: list[GuardrailViolation] = field(default_factory=list)
+    guardrail_scores: dict[str, int] = field(default_factory=dict)
 
     @property
     def reasoning_summary(self) -> str:
@@ -200,8 +203,10 @@ class ResolutionAgent:
     ) -> AgentResult:
         """Draft, validate, and regenerate up to ``max_attempts`` times."""
         llm_calls: list[DraftOutcome] = []
+        judge_calls: list[JudgeCallMetadata] = []
         feedback = ""
         last_draft: DraftedResponse | None = None
+        last_guardrail: GuardrailOutcome | None = None
 
         for attempt in range(1, self.max_attempts + 1):
             try:
@@ -219,6 +224,7 @@ class ResolutionAgent:
                     status=STATUS_UNAVAILABLE,
                     reasoning_steps=reasoning,
                     llm_calls=llm_calls,
+                    judge_calls=judge_calls,
                     attempts=attempt - 1,
                 )
 
@@ -230,14 +236,21 @@ class ResolutionAgent:
             )
 
             guardrail = await self.guardrails.validate(outcome.drafted, draft_input)
+            last_guardrail = guardrail
+            if guardrail.judge_call is not None:
+                judge_calls.append(guardrail.judge_call)
             if guardrail.passed:
-                reasoning.append(f"attempt {attempt}: guardrails passed")
+                scores_note = f" (tone scores: {guardrail.scores})" if guardrail.scores else ""
+                reasoning.append(f"attempt {attempt}: guardrails passed{scores_note}")
                 return AgentResult(
-                    drafted=last_draft,
+                    # Ship the PII-redacted copy when the engine produced one.
+                    drafted=guardrail.sanitized_draft or last_draft,
                     status=STATUS_PASSED,
                     reasoning_steps=reasoning,
                     llm_calls=llm_calls,
+                    judge_calls=judge_calls,
                     attempts=attempt,
+                    guardrail_scores=guardrail.scores,
                 )
             feedback = guardrail.feedback
             reasoning.append(f"attempt {attempt}: guardrails failed -> {feedback}")
@@ -248,6 +261,9 @@ class ResolutionAgent:
             status=STATUS_FAILED,
             reasoning_steps=reasoning,
             llm_calls=llm_calls,
+            judge_calls=judge_calls,
             attempts=self.max_attempts,
             guardrail_feedback=feedback,
+            guardrail_violations=last_guardrail.violations if last_guardrail else [],
+            guardrail_scores=last_guardrail.scores if last_guardrail else {},
         )
