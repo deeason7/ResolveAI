@@ -116,6 +116,35 @@ class ComplaintQueueResponse(BaseModel):
     offset: int
 
 
+class SimilarComplaintItem(ComplaintQueueItem):
+    """One vector-search hit for GET /complaints/{id}/similar.
+
+    Same lean row shape as the queue, plus the cosine score and the
+    historical company_response — the response is what makes a similar
+    complaint useful as a precedent. Fields come from Postgres, not the
+    Qdrant payload: the payload is a search index with two coexisting
+    vintages, the database is the source of truth.
+    """
+
+    similarity_score: float
+    company_response: str | None
+
+    @classmethod
+    def from_hit(cls, complaint: Complaint, score: float) -> SimilarComplaintItem:
+        base = ComplaintQueueItem.from_complaint(complaint)
+        return cls(
+            **base.model_dump(),
+            similarity_score=score,
+            company_response=complaint.company_response,
+        )
+
+
+class SimilarComplaintsResponse(BaseModel):
+    """Top-K similarity hits. No total/offset — K-nearest search doesn't paginate."""
+
+    items: list[SimilarComplaintItem]
+
+
 class BulkImportRequest(BaseModel):
     """Body for POST /complaints/bulk-import (admin only)."""
 

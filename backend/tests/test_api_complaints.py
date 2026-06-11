@@ -496,3 +496,150 @@ class TestTriageQueue:
     async def test_requires_auth(self, client: AsyncClient):
         r = await client.get(QUEUE_URL)
         assert r.status_code == 401
+
+
+# ── similar complaints ────────────────────────────────────────────────────────
+
+
+def _fake_vector_search(hits, recorder=None):
+    """Stand-in for the VectorStore seam: returns canned hits, records args."""
+    from app.services.vector_store import SimilarComplaint
+
+    class _FakeStore:
+        def search_similar(self, vector, filters, limit):
+            if recorder is not None:
+                recorder.update({"vector": vector, "filters": filters, "limit": limit})
+            return [SimilarComplaint(complaint_id=str(i), score=s, payload={}) for i, s in hits]
+
+    return _FakeStore()
+
+
+def _patch_similar(monkeypatch, store):
+    import app.api.routes.complaints as cr
+
+    monkeypatch.setattr(cr, "embed_text", lambda text: [0.1] * 384)
+    monkeypatch.setattr(cr, "get_default_store", lambda: store)
+
+
+class TestSimilarComplaints:
+    async def test_returns_hits_excluding_self(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued(company="Query", company_response="Closed with explanation")
+        near = _queued(company="Near", company_response="Closed with relief")
+        far = _queued(company="Far", company_response=None)
+        await _seed_queue(query, near, far)
+
+        store = _fake_vector_search([(query.id, 0.999), (near.id, 0.91), (far.id, 0.83)])
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 200, r.text
+        items = r.json()["items"]
+        assert [i["company"] for i in items] == ["Near", "Far"]
+        assert items[0]["similarity_score"] == 0.91
+        assert items[0]["company_response"] == "Closed with relief"
+        assert "narrative" not in items[0]  # lean row, preview only
+
+    async def test_self_exclusion_does_not_shrink_page(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        """limit=1 + self as top hit: the +1 over-fetch keeps one real result."""
+        query = _queued(company="Query")
+        near = _queued(company="Near")
+        await _seed_queue(query, near)
+
+        recorder = {}
+        store = _fake_vector_search([(query.id, 0.999), (near.id, 0.9)], recorder)
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(
+            f"{COMPLAINTS_URL}{query.id}/similar",
+            params={"limit": 1},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Near"]
+        assert recorder["limit"] == 2
+
+    async def test_product_filter_forwarded_to_store(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+
+        recorder = {}
+        _patch_similar(monkeypatch, _fake_vector_search([], recorder))
+
+        r = await client.get(
+            f"{COMPLAINTS_URL}{query.id}/similar",
+            params={"product": "Mortgage"},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200
+        assert recorder["filters"] == {"product": "Mortgage"}
+
+    async def test_hits_missing_from_db_are_skipped(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        """A stale vector index must not 500 the endpoint."""
+        import uuid as _uuid
+
+        query = _queued(company="Query")
+        near = _queued(company="Near")
+        await _seed_queue(query, near)
+
+        ghost = _uuid.uuid4()  # embedded once, row since deleted
+        store = _fake_vector_search([(near.id, 0.9), (ghost, 0.85)])
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Near"]
+
+    async def test_unknown_complaint_returns_404(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        import uuid as _uuid
+
+        _patch_similar(monkeypatch, _fake_vector_search([]))
+        r = await client.get(
+            f"{COMPLAINTS_URL}{_uuid.uuid4()}/similar", headers=_auth(analyst_token)
+        )
+        assert r.status_code == 404
+
+    async def test_store_failure_returns_503(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+
+        class _DownStore:
+            def search_similar(self, vector, filters, limit):
+                raise ConnectionError("qdrant unreachable")
+
+        _patch_similar(monkeypatch, _DownStore())
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 503
+
+    async def test_limit_out_of_range_rejected(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+        _patch_similar(monkeypatch, _fake_vector_search([]))
+
+        for bad in (0, 11):
+            r = await client.get(
+                f"{COMPLAINTS_URL}{query.id}/similar",
+                params={"limit": bad},
+                headers=_auth(analyst_token),
+            )
+            assert r.status_code == 422
+
+    async def test_requires_auth(self, client: AsyncClient):
+        import uuid as _uuid
+
+        r = await client.get(f"{COMPLAINTS_URL}{_uuid.uuid4()}/similar")
+        assert r.status_code == 401

@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import os
 from typing import Any
+from urllib.parse import quote
 
 import httpx
 import streamlit as st
@@ -155,6 +156,22 @@ def get_complaint(complaint_id: str) -> dict:
 
 def submit_complaint(payload: dict) -> dict:
     return _request("POST", "/complaints/", json=payload).json()
+
+
+def similar_complaints(complaint_id: str, limit: int = 5, product: str | None = None) -> dict:
+    params: dict[str, Any] = {"limit": limit}
+    if product:
+        params["product"] = product
+    return _request("GET", f"/complaints/{complaint_id}/similar", params=params).json()
+
+
+# ── knowledge graph ───────────────────────────────────────────────────────────
+
+
+def company_profile(name: str) -> dict:
+    # quote(safe="") because company names contain commas, ampersands and the
+    # odd slash — an unescaped "/" would split the path and 404.
+    return _request("GET", f"/graph/company/{quote(name, safe='')}").json()
 
 
 # ── analytics ─────────────────────────────────────────────────────────────────

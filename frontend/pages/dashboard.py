@@ -5,11 +5,16 @@ One trends fetch (365 days of daily buckets) feeds the metric cards, the
 trend deltas, and the sentiment donut; slicing windows client-side with
 pandas beats four near-identical aggregate calls per rerun. The heatmap,
 company bar, and activity feed each have their own endpoint.
+
+Card/donut windows anchor to the latest event date in the data, not
+wall-clock today — the CFPB dump's date_received ends in the past, so a
+"today" window would always read zero. A date_input overrides the anchor;
+once live submissions arrive the default lands on the real today anyway.
 """
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import date, timedelta
 
 import pandas as pd
 import plotly.express as px
@@ -17,30 +22,23 @@ import streamlit as st
 
 import api_client
 from api_client import ApiError
-
-SENTIMENT_COLORS = {
-    "neutral": "#2e7d32",
-    "negative": "#f9a825",
-    "extreme_negative": "#c62828",
-    "unclassified": "#9e9e9e",
-}
+from theme import PLOT_MARGIN, SENTIMENT_COLORS
 
 
-def _window_count(df: pd.DataFrame, start: datetime, end: datetime) -> int:
+def _window_count(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> int:
     mask = (df["day"] >= start) & (df["day"] < end)
     return int(df.loc[mask, "count"].sum())
 
 
-def _metric_cards(df: pd.DataFrame) -> None:
-    today = pd.Timestamp(datetime.utcnow().date())
+def _metric_cards(df: pd.DataFrame, anchor: pd.Timestamp) -> None:
     windows = [
-        ("Today", today, 1),
-        ("This week", today - timedelta(days=6), 7),
-        ("This month", today - timedelta(days=29), 30),
+        ("Complaints (1d)", anchor, 1),
+        ("Complaints (7d)", anchor - timedelta(days=6), 7),
+        ("Complaints (30d)", anchor - timedelta(days=29), 30),
     ]
     cols = st.columns(4)
     for col, (label, start, span) in zip(cols, windows, strict=False):
-        current = _window_count(df, start, today + timedelta(days=1))
+        current = _window_count(df, start, anchor + timedelta(days=1))
         previous = _window_count(df, start - timedelta(days=span), start)
         with col:
             st.metric(label, f"{current:,}", delta=current - previous)
@@ -56,7 +54,7 @@ def _metric_cards(df: pd.DataFrame) -> None:
         )
 
 
-def _sentiment_donut(df: pd.DataFrame) -> None:
+def _sentiment_donut(df: pd.DataFrame, anchor: pd.Timestamp) -> None:
     st.subheader("Sentiment distribution")
     days = st.radio(
         "Window",
@@ -66,8 +64,9 @@ def _sentiment_donut(df: pd.DataFrame) -> None:
         horizontal=True,
         label_visibility="collapsed",
     )
-    start = pd.Timestamp(datetime.utcnow().date()) - timedelta(days=days - 1)
-    window = df[df["day"] >= start].groupby("sentiment", as_index=False)["count"].sum()
+    start = anchor - timedelta(days=days - 1)
+    mask = (df["day"] >= start) & (df["day"] <= anchor)
+    window = df[mask].groupby("sentiment", as_index=False)["count"].sum()
     if window.empty:
         st.info("No complaints in this window.")
         return
@@ -79,7 +78,7 @@ def _sentiment_donut(df: pd.DataFrame) -> None:
         color="sentiment",
         color_discrete_map=SENTIMENT_COLORS,
     )
-    fig.update_layout(margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=320)
+    fig.update_layout(margin=PLOT_MARGIN, height=320)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -100,9 +99,7 @@ def _urgency_heatmap(breakdown: dict) -> None:
         aspect="auto",
         color_continuous_scale="Reds",
     )
-    fig.update_layout(
-        margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=360, coloraxis_showscale=False
-    )
+    fig.update_layout(margin=PLOT_MARGIN, height=360, coloraxis_showscale=False)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(f"Classified complaints only — {classified:,} of {total:,} in the top 10 products")
 
@@ -121,9 +118,7 @@ def _top_companies(risk: dict) -> None:
         orientation="h",
         hover_data=["avg_urgency", "urgent_count", "extreme_negative_count"],
     )
-    fig.update_layout(
-        margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=360, xaxis_title=None, yaxis_title=None
-    )
+    fig.update_layout(margin=PLOT_MARGIN, height=360, xaxis_title=None, yaxis_title=None)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -158,12 +153,30 @@ try:
     points = pd.DataFrame(trends["points"], columns=["day", "sentiment", "count"])
     points["day"] = pd.to_datetime(points["day"])
 
-    _metric_cards(points)
+    latest = points["day"].max().date() if not points.empty else date.today()
+    # The widget sits below the cards, so read its value from session_state:
+    # a change is committed there before the rerun reaches this line.
+    anchor = pd.Timestamp(st.session_state.get("ref_date", latest))
+
+    _metric_cards(points, anchor)
+    if anchor.date() == latest:
+        st.caption(
+            f"Windows are relative to {anchor:%B %d, %Y} — the most recent complaint "
+            "on record, not today's date. Override below."
+        )
+    else:
+        st.caption(
+            f"Windows are relative to {anchor:%B %d, %Y} "
+            f"(most recent complaint: {latest:%B %d, %Y})."
+        )
+    ref_col, _ = st.columns([1, 4])
+    with ref_col:
+        st.date_input("Reference date", value=latest, key="ref_date")
     st.divider()
 
     left, right = st.columns(2)
     with left:
-        _sentiment_donut(points)
+        _sentiment_donut(points, anchor)
     with right:
         _urgency_heatmap(api_client.products_breakdown())
 
