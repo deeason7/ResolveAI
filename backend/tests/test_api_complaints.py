@@ -367,3 +367,279 @@ class TestBulkImport:
         assert second.status_code == 200
         assert second.json()["rows_read"] == 1
         assert second.json()["rows_inserted"] == 0  # ON CONFLICT skipped it
+
+
+# ── triage queue ──────────────────────────────────────────────────────────────
+
+
+def _queued(**overrides):
+    """Build an unsaved Complaint with queue-relevant defaults."""
+    from app.models.complaint import Complaint, ComplaintStatus
+
+    fields = {
+        "narrative": "A narrative comfortably above the minimum length for a complaint.",
+        "product": "Credit card",
+        "company": "BigBank",
+        "status": ComplaintStatus.classified,
+        "sentiment": "negative",
+        "urgency": 3,
+        "priority_score": 0.5,
+    }
+    fields.update(overrides)
+    return Complaint(**fields)
+
+
+async def _seed_queue(*complaints) -> None:
+    from app.database import engine
+
+    factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as s:
+        for c in complaints:
+            s.add(c)
+        await s.commit()
+
+
+QUEUE_URL = "/api/v1/complaints/queue"
+
+
+class TestTriageQueue:
+    async def test_orders_by_priority_desc_nulls_last(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        await _seed_queue(
+            _queued(company="Mid", priority_score=0.5),
+            _queued(company="Top", priority_score=0.9),
+            _queued(company="Unscored", priority_score=None, urgency=None),
+        )
+
+        r = await client.get(QUEUE_URL, headers=_auth(analyst_token))
+        assert r.status_code == 200, r.text
+        assert [i["company"] for i in r.json()["items"]] == ["Top", "Mid", "Unscored"]
+
+    async def test_excludes_pending_and_resolved_by_default(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        from app.models.complaint import ComplaintStatus
+
+        await _seed_queue(
+            _queued(company="Fresh", status=ComplaintStatus.pending),
+            _queued(company="Done", status=ComplaintStatus.resolved),
+            _queued(company="Active", status=ComplaintStatus.escalated),
+        )
+
+        r = await client.get(QUEUE_URL, headers=_auth(analyst_token))
+        assert r.status_code == 200
+        body = r.json()
+        assert [i["company"] for i in body["items"]] == ["Active"]
+        assert body["total"] == 1
+
+    async def test_status_filter_overrides_default_scope(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        from app.models.complaint import ComplaintStatus
+
+        await _seed_queue(
+            _queued(company="Fresh", status=ComplaintStatus.pending),
+            _queued(company="Active", status=ComplaintStatus.classified),
+        )
+
+        r = await client.get(QUEUE_URL, params={"status": "pending"}, headers=_auth(analyst_token))
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Fresh"]
+
+    async def test_urgency_range_filter(self, client: AsyncClient, analyst_token: str):
+        await _seed_queue(
+            _queued(company="Low", urgency=1),
+            _queued(company="Mid", urgency=3),
+            _queued(company="High", urgency=5),
+        )
+
+        r = await client.get(
+            QUEUE_URL,
+            params={"urgency_min": 2, "urgency_max": 4},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Mid"]
+
+    async def test_urgency_min_above_max_rejected(self, client: AsyncClient, analyst_token: str):
+        r = await client.get(
+            QUEUE_URL,
+            params={"urgency_min": 4, "urgency_max": 2},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 422
+
+    async def test_sentiment_filter(self, client: AsyncClient, analyst_token: str):
+        await _seed_queue(
+            _queued(company="Angry", sentiment="extreme_negative"),
+            _queued(company="Calm", sentiment="neutral"),
+        )
+
+        r = await client.get(
+            QUEUE_URL, params={"sentiment": "extreme_negative"}, headers=_auth(analyst_token)
+        )
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Angry"]
+
+    async def test_narrative_preview_is_truncated(self, client: AsyncClient, analyst_token: str):
+        from app.schemas.complaint import QUEUE_PREVIEW_CHARS
+
+        await _seed_queue(_queued(narrative="x" * 1000))
+
+        r = await client.get(QUEUE_URL, headers=_auth(analyst_token))
+        assert r.status_code == 200
+        item = r.json()["items"][0]
+        assert len(item["narrative_preview"]) == QUEUE_PREVIEW_CHARS
+        assert "narrative" not in item
+
+    async def test_requires_auth(self, client: AsyncClient):
+        r = await client.get(QUEUE_URL)
+        assert r.status_code == 401
+
+
+# ── similar complaints ────────────────────────────────────────────────────────
+
+
+def _fake_vector_search(hits, recorder=None):
+    """Stand-in for the VectorStore seam: returns canned hits, records args."""
+    from app.services.vector_store import SimilarComplaint
+
+    class _FakeStore:
+        def search_similar(self, vector, filters, limit):
+            if recorder is not None:
+                recorder.update({"vector": vector, "filters": filters, "limit": limit})
+            return [SimilarComplaint(complaint_id=str(i), score=s, payload={}) for i, s in hits]
+
+    return _FakeStore()
+
+
+def _patch_similar(monkeypatch, store):
+    import app.api.routes.complaints as cr
+
+    monkeypatch.setattr(cr, "embed_text", lambda text: [0.1] * 384)
+    monkeypatch.setattr(cr, "get_default_store", lambda: store)
+
+
+class TestSimilarComplaints:
+    async def test_returns_hits_excluding_self(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued(company="Query", company_response="Closed with explanation")
+        near = _queued(company="Near", company_response="Closed with relief")
+        far = _queued(company="Far", company_response=None)
+        await _seed_queue(query, near, far)
+
+        store = _fake_vector_search([(query.id, 0.999), (near.id, 0.91), (far.id, 0.83)])
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 200, r.text
+        items = r.json()["items"]
+        assert [i["company"] for i in items] == ["Near", "Far"]
+        assert items[0]["similarity_score"] == 0.91
+        assert items[0]["company_response"] == "Closed with relief"
+        assert "narrative" not in items[0]  # lean row, preview only
+
+    async def test_self_exclusion_does_not_shrink_page(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        """limit=1 + self as top hit: the +1 over-fetch keeps one real result."""
+        query = _queued(company="Query")
+        near = _queued(company="Near")
+        await _seed_queue(query, near)
+
+        recorder = {}
+        store = _fake_vector_search([(query.id, 0.999), (near.id, 0.9)], recorder)
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(
+            f"{COMPLAINTS_URL}{query.id}/similar",
+            params={"limit": 1},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Near"]
+        assert recorder["limit"] == 2
+
+    async def test_product_filter_forwarded_to_store(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+
+        recorder = {}
+        _patch_similar(monkeypatch, _fake_vector_search([], recorder))
+
+        r = await client.get(
+            f"{COMPLAINTS_URL}{query.id}/similar",
+            params={"product": "Mortgage"},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200
+        assert recorder["filters"] == {"product": "Mortgage"}
+
+    async def test_hits_missing_from_db_are_skipped(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        """A stale vector index must not 500 the endpoint."""
+        import uuid as _uuid
+
+        query = _queued(company="Query")
+        near = _queued(company="Near")
+        await _seed_queue(query, near)
+
+        ghost = _uuid.uuid4()  # embedded once, row since deleted
+        store = _fake_vector_search([(near.id, 0.9), (ghost, 0.85)])
+        _patch_similar(monkeypatch, store)
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 200
+        assert [i["company"] for i in r.json()["items"]] == ["Near"]
+
+    async def test_unknown_complaint_returns_404(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        import uuid as _uuid
+
+        _patch_similar(monkeypatch, _fake_vector_search([]))
+        r = await client.get(
+            f"{COMPLAINTS_URL}{_uuid.uuid4()}/similar", headers=_auth(analyst_token)
+        )
+        assert r.status_code == 404
+
+    async def test_store_failure_returns_503(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+
+        class _DownStore:
+            def search_similar(self, vector, filters, limit):
+                raise ConnectionError("qdrant unreachable")
+
+        _patch_similar(monkeypatch, _DownStore())
+
+        r = await client.get(f"{COMPLAINTS_URL}{query.id}/similar", headers=_auth(analyst_token))
+        assert r.status_code == 503
+
+    async def test_limit_out_of_range_rejected(
+        self, client: AsyncClient, analyst_token: str, monkeypatch
+    ):
+        query = _queued()
+        await _seed_queue(query)
+        _patch_similar(monkeypatch, _fake_vector_search([]))
+
+        for bad in (0, 11):
+            r = await client.get(
+                f"{COMPLAINTS_URL}{query.id}/similar",
+                params={"limit": bad},
+                headers=_auth(analyst_token),
+            )
+            assert r.status_code == 422
+
+    async def test_requires_auth(self, client: AsyncClient):
+        import uuid as _uuid
+
+        r = await client.get(f"{COMPLAINTS_URL}{_uuid.uuid4()}/similar")
+        assert r.status_code == 401
