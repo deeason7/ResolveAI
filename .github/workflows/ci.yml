@@ -1,0 +1,47 @@
+# Lint + tests on every push/PR. The suite runs on SQLite with injected
+# fakes for Redis/Qdrant/Neo4j/LLMs, so no service containers are needed —
+# which keeps the whole job under a couple of minutes.
+name: ci
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+
+jobs:
+  lint-and-test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - uses: astral-sh/setup-uv@v5
+
+      - name: Install backend with dev tools
+        working-directory: backend
+        run: uv sync --extra dev
+
+      - name: Lint (backend + frontend, zero-warning policy)
+        working-directory: backend
+        run: |
+          uv run ruff check . ../frontend
+          uv run ruff format --check . ../frontend
+
+      - name: Tests
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+        run: uv run pytest tests/ -q
+
+  docker-build:
+    # Catches Dockerfile rot without booting the stack.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Provide an env file (compose validates its presence)
+        run: cp .env.example .env
+      - name: Build images
+        run: docker compose build api frontend
