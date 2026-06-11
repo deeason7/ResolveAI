@@ -14,12 +14,7 @@ import streamlit as st
 
 import api_client
 from api_client import ApiError
-
-SENTIMENT_BADGES = {
-    "neutral": "🟢 neutral",
-    "negative": "🟡 negative",
-    "extreme_negative": "🔴 extreme",
-}
+from theme import SENTIMENT_BADGES
 
 STATUS_OPTIONS = [
     "all actionable",
@@ -108,8 +103,11 @@ def _action_panel(item: dict) -> None:
         )
         st.write(item["narrative_preview"] + ("…" if len(item["narrative_preview"]) == 200 else ""))
 
-        trigger, hint = st.columns([1, 3])
-        if trigger.button("⚙️ Generate resolution", type="primary"):
+        opener, trigger, hint = st.columns([1, 1, 2])
+        if opener.button("🔍 Open detail", use_container_width=True):
+            st.session_state["detail_complaint_id"] = item["id"]
+            st.switch_page("pages/complaint_detail.py")
+        if trigger.button("⚙️ Generate resolution", type="primary", use_container_width=True):
             try:
                 api_client.generate_resolution(item["id"])
             except ApiError as exc:
@@ -121,10 +119,7 @@ def _action_panel(item: dict) -> None:
                     st.error(exc.detail)
             else:
                 st.success("Resolution queued — the agent is on it. Check back shortly.")
-        hint.caption(
-            f"Complaint `{item['id']}` — full narrative and agent reasoning land with the "
-            "Complaint Detail page."
-        )
+        hint.caption(f"Complaint `{item['id']}`")
 
 
 st.title("📋 Triage Queue")
