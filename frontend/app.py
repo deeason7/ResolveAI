@@ -26,6 +26,8 @@ if api_client.is_authenticated():
         st.Page("pages/triage_queue.py", title="Triage Queue", icon="📋"),
         st.Page("pages/complaint_detail.py", title="Complaint Detail", icon="🔍"),
         st.Page("pages/analytics.py", title="Analytics", icon="📈"),
+        st.Page("pages/graph_explorer.py", title="Graph Explorer", icon="🕸️"),
+        st.Page("pages/llmops.py", title="LLMOps Observatory", icon="🔬"),
     ]
 else:
     pages = [st.Page(auth.render_login_page, title="Sign in", icon="🔒")]
