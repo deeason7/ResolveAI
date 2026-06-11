@@ -1,10 +1,11 @@
 """
-Guided tour for demo sessions.
+Guided tour for demo sessions — a Back/Next stepper, not a lecture.
 
-Each page renders a walkthrough box explaining what's on screen, what's real,
-and where to go next — so a visitor who skipped registration still gets the
-full story without anyone standing next to them. The boxes only appear in
-demo mode; signed-in reviewers know their own tools.
+Each step is two business-first sentences plus one thing to try; Next walks
+the visitor across pages in a deliberate order. If they wander off-route
+the tour quietly re-syncs to wherever they are (free play is the point —
+the stepper is a rail, not a cage). Technical depth lives in the sidebar's
+"Under the hood" panel, which only the final step advertises.
 """
 
 from __future__ import annotations
@@ -13,122 +14,140 @@ import streamlit as st
 
 import api_client
 
-_WELCOME = """
-**Welcome to ResolveAI** — an intelligent complaint-resolution engine running over
-**200,000 real consumer complaints** from the CFPB's public database.
+# api_client.clear_session() pops this on logout (string kept in sync there).
+_STEP_KEY = "tour_step"
 
-The pipeline behind this dashboard: a complaint arrives → a **fine-tuned small language
-model** classifies its sentiment, intent and urgency → **vector search** digs up similar
-past cases and a **knowledge graph** supplies the regulations in play → an **agent**
-drafts a regulator-aware response → a **four-layer guardrail engine** validates the
-draft → a **human reviewer** approves or rejects it. This dashboard is the human's seat.
+STEPS = [
+    {
+        "page": "dashboard",
+        "file": "pages/dashboard.py",
+        "title": "Welcome to ResolveAI",
+        "body": "A backlog of **200,000 real consumer complaints**, turned into a "
+        "prioritized, explainable workflow — AI drafts responses in seconds, "
+        "a human approves every word.",
+        "try": "Press **Next** to walk through, or just wander — the tour follows you.",
+    },
+    {
+        "page": "dashboard",
+        "file": "pages/dashboard.py",
+        "title": "The operations pulse",
+        "body": "Volume, customer mood, urgency hot spots, and the companies driving "
+        "risk — the picture an operations lead checks every morning.",
+        "try": "Switch the donut window, or pick a different reference date under the cards.",
+    },
+    {
+        "page": "triage_queue",
+        "file": "pages/triage_queue.py",
+        "title": "The morning worklist",
+        "body": "Most damaging complaints first, so teams spend minutes deciding what "
+        "matters instead of hours reading. Filters answer *“show me urgent "
+        "cases at company X”* instantly.",
+        "try": "Select any row, then hit **🔍 Open detail**.",
+    },
+    {
+        "page": "complaint_detail",
+        "file": "pages/complaint_detail.py",
+        "title": "One complaint, full context",
+        "body": "The customer's own words, how the AI read them, and how similar cases "
+        "were actually resolved before — precedent on tap instead of tribal memory.",
+        "try": "Toggle **Same product only**, or jump into a similar case with **Open**.",
+    },
+    {
+        "page": "complaint_detail",
+        "file": "pages/complaint_detail.py",
+        "title": "Draft → check → human",
+        "body": "An agent writes a regulation-aware draft, four guardrails vet it, and a "
+        "reviewer approves it or sends it back with feedback the AI must address. "
+        "Days of response time become minutes — accountability stays human.",
+        "try": "Expand **Agent chain of thought** to watch it show its work.",
+    },
+    {
+        "page": "analytics",
+        "file": "pages/analytics.py",
+        "title": "The leadership view",
+        "body": "Trends, product hot spots, and a company risk scorecard — the view for "
+        "deciding where to put people, process, and pressure.",
+        "try": "Click a column header to sort the scorecard.",
+    },
+    {
+        "page": "graph_explorer",
+        "file": "pages/graph_explorer.py",
+        "title": "Institutional memory, drawn",
+        "body": "Companies, products, issues, and regulations as one connected map — the "
+        "same map the AI consults when it cites a rule in a draft.",
+        "try": "Search any company, pick a node, and **🧭 Explore from here**.",
+    },
+    {
+        "page": "llmops",
+        "file": "pages/llmops.py",
+        "title": "AI you can govern",
+        "body": "What the AI costs (this entire corpus: about **three cents**), how fast "
+        "it answers, and receipts that it fails safe — every blocked draft and "
+        "fallback is on the record.",
+        "try": "Hover the routing donut — red means *the AI refused to guess*.",
+    },
+    {
+        "page": "llmops",
+        "file": "pages/llmops.py",
+        "title": "That's ResolveAI",
+        "body": "Explainable triage, guarded drafts, humans in charge. Keep playing — "
+        "everything here is safe to click. Curious how it's built? Open "
+        "**🛠️ Under the hood** in the sidebar on any page.",
+        "try": None,
+    },
+]
 
-You're in a **read-only demo session** — look at everything, the write buttons are
-politely disabled. 💡 Every page also has **🛠️ Under the hood** in the sidebar:
-the architectural decisions behind exactly what you're looking at.
-"""
 
-_PAGES = {
-    "dashboard": _WELCOME
-    + """
----
-**This page — Dashboard Home, the at-a-glance view:**
-- **Metric cards** — complaint volume over 1/7/30-day windows, anchored to the newest
-  complaint on record (the caption says which date; the picker below changes it).
-- **Sentiment donut** — neutral / negative / extreme-negative split for the window you
-  pick; *unclassified* volume is shown honestly instead of hidden.
-- **Urgency × product heatmap** — where the urgent complaints concentrate.
-- **Top companies** — volume leaders; hover for severity stats.
-- **Recent activity** — the latest complaints in the system.
+def restart() -> None:
+    """Reset to step one. The sidebar's Restart-tour button calls this."""
+    st.session_state[_STEP_KEY] = 0
 
-→ Next: open **Triage Queue** in the sidebar — the reviewer's worklist.
-""",
-    "triage_queue": """
-**Triage Queue — the reviewer's worklist.**
 
-- Rows are sorted by **priority score**, then urgency, then oldest-first — so two
-  equally urgent complaints can't queue-jump by recency. Sorting, filtering and
-  pagination all happen server-side over the full corpus.
-- **Filters** — status, sentiment, urgency range, product, company.
-- **Select a row** to preview it. In a live session the ⚙️ button hands the complaint
-  to the resolution agent; it's disabled here.
-
-→ Select a row and click **🔍 Open detail** to follow one complaint all the way down.
-""",
-    "complaint_detail": """
-**Complaint Detail — everything the system knows about one complaint.**
-
-- **Narrative & classification** — the consumer's own words next to the model's read:
-  sentiment, intent, urgency 1-5, computed priority.
-- **Similar complaints** — nearest neighbors by embedding similarity across all 200K
-  narratives (384-dim sentence-transformer vectors, cosine search), each shown with how
-  it was historically resolved — the precedents a reviewer would reach for. Try the
-  **same product only** toggle and the per-row **Open** buttons.
-- **Resolution panel** — when the agent has drafted a response: its step-by-step
-  reasoning, a verdict per guardrail layer (*structural · content safety · regulatory
-  accuracy · tone*), the draft itself, and the approve / reject-with-feedback controls a
-  reviewer uses (rejection feedback feeds the agent's regeneration). Disabled in demo.
-
-→ Next: **Analytics** in the sidebar for the corpus-level picture.
-""",
-    "analytics": """
-**Analytics — the whole corpus in aggregate.**
-
-- **Weekly sentiment trend** — volume and classification coverage over time.
-- **Product treemap** — sized by volume, colored by urgent-complaint count.
-- **Urgency histogram** — including the honest *n/a* bucket: the classifier's backlog.
-- **Company risk scorecard** — Postgres severity aggregates joined live with each
-  company's risk score and linked regulation violations from the **Neo4j knowledge
-  graph**. Two stores, one table; every column's source is in the caption.
-
-→ Next: **Graph Explorer** — walk that knowledge graph visually.
-""",
-    "graph_explorer": """
-**Graph Explorer — the knowledge graph, live.**
-
-Companies, products, issues, regulations and resolution patterns live in a **Neo4j
-graph** seeded from the complaint corpus; the agent queries it for regulations and
-company history when drafting responses.
-
-- **Search any node** — a company ("EQUIFAX, INC."), product, issue, or regulation —
-  and the canvas renders its neighborhood out to the depth you pick (capped at 3:
-  this graph is dense, and unbounded traversals would pull most of it back).
-- **Drag, zoom, hover** for node properties; colors mark the node type (legend above
-  the canvas).
-- **Inspect panel** — pick a node for its details (companies show live complaint
-  totals and risk score) and hit *Explore from here* to re-center the graph on it.
-
-→ Last stop: **LLMOps Observatory** — what the AI itself costs, how fast it runs,
-and every guardrail catch.
-""",
-    "llmops": """
-**LLMOps Observatory — the dashboard about the models themselves.**
-
-Every model call this system makes is metered into a log with provider, tokens, cost
-and latency. This page is that telemetry:
-
-- **Spend** — daily bars per provider with a cumulative line; the whole demo corpus
-  was classified for pennies.
-- **Call routing** — local fine-tuned model vs cloud vs the **fail-closed path**
-  (when no provider answers, complaints get flagged maximum-severity for humans
-  instead of guessed labels — red in the donut, by design).
-- **Latency by operation** — p50/p95, log scale, because local CPU inference and
-  cloud calls live in different worlds.
-- **Classifier output over time** — drift watch, bucketed by when calls actually ran.
-- **Guardrail violation log** — every rule the validation engine has tripped,
-  filterable by layer.
-
-That's the full tour — thanks for looking around! The sidebar's **🛠️ Under the
-hood** has the architecture story for every page you just saw.
-""",
-}
+def _goto(idx: int, current_page: str) -> None:
+    st.session_state[_STEP_KEY] = idx
+    if STEPS[idx]["page"] != current_page:
+        st.switch_page(STEPS[idx]["file"])
+    st.rerun()
 
 
 def render(page: str) -> None:
-    """Show the walkthrough box for `page` — demo sessions only."""
+    """Compact stepper banner for `page` — demo sessions only."""
     if not api_client.is_demo():
         return
-    copy = _PAGES.get(page)
-    if copy:
-        with st.expander("📖 Demo tour — what am I looking at?", expanded=True):
-            st.markdown(copy)
+    if _STEP_KEY not in st.session_state:
+        st.session_state[_STEP_KEY] = 0  # fresh demo session → tour starts itself
+    idx = st.session_state[_STEP_KEY]
+    if idx is None:
+        return  # tour finished or dismissed
+
+    # Wandered off-route? Re-sync to this page's first step.
+    if STEPS[idx]["page"] != page:
+        synced = next((i for i, s in enumerate(STEPS) if s["page"] == page), None)
+        if synced is None:
+            return
+        idx = st.session_state[_STEP_KEY] = synced
+
+    step = STEPS[idx]
+    last = idx == len(STEPS) - 1
+    with st.container(border=True):
+        st.markdown(f"🧭 **{step['title']}** · step {idx + 1} of {len(STEPS)}")
+        st.markdown(step["body"])
+        if step["try"]:
+            st.caption(f"💡 {step['try']}")
+        back, nxt, skip, _ = st.columns([1, 1, 1, 3])
+        if back.button("⬅ Back", key="tour_back", disabled=idx == 0, use_container_width=True):
+            _goto(idx - 1, page)
+        if nxt.button(
+            "Finish ✓" if last else "Next ➡",
+            key="tour_next",
+            type="primary",
+            use_container_width=True,
+        ):
+            if last:
+                st.session_state[_STEP_KEY] = None
+                st.rerun()
+            else:
+                _goto(idx + 1, page)
+        if not last and skip.button("End tour", key="tour_skip", use_container_width=True):
+            st.session_state[_STEP_KEY] = None
+            st.rerun()

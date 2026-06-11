@@ -17,6 +17,7 @@ import streamlit as st
 import api_client
 import auth
 import engineering_notes
+import tour
 
 st.set_page_config(page_title="ResolveAI", page_icon="📨", layout="wide")
 
@@ -40,6 +41,9 @@ if api_client.is_authenticated():
     with st.sidebar:
         if api_client.is_demo():
             st.caption("**Demo mode** — read-only guided tour")
+            if st.button("🧭 Restart tour", use_container_width=True):
+                tour.restart()
+                st.switch_page("pages/dashboard.py")
             signout_label = "Exit demo"
         else:
             user = api_client.current_user() or {}
