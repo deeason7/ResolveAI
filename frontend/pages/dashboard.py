@@ -22,13 +22,7 @@ import streamlit as st
 
 import api_client
 from api_client import ApiError
-
-SENTIMENT_COLORS = {
-    "neutral": "#2e7d32",
-    "negative": "#f9a825",
-    "extreme_negative": "#c62828",
-    "unclassified": "#9e9e9e",
-}
+from theme import PLOT_MARGIN, SENTIMENT_COLORS
 
 
 def _window_count(df: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp) -> int:
@@ -84,7 +78,7 @@ def _sentiment_donut(df: pd.DataFrame, anchor: pd.Timestamp) -> None:
         color="sentiment",
         color_discrete_map=SENTIMENT_COLORS,
     )
-    fig.update_layout(margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=320)
+    fig.update_layout(margin=PLOT_MARGIN, height=320)
     st.plotly_chart(fig, use_container_width=True)
 
 
@@ -105,9 +99,7 @@ def _urgency_heatmap(breakdown: dict) -> None:
         aspect="auto",
         color_continuous_scale="Reds",
     )
-    fig.update_layout(
-        margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=360, coloraxis_showscale=False
-    )
+    fig.update_layout(margin=PLOT_MARGIN, height=360, coloraxis_showscale=False)
     st.plotly_chart(fig, use_container_width=True)
     st.caption(f"Classified complaints only — {classified:,} of {total:,} in the top 10 products")
 
@@ -126,9 +118,7 @@ def _top_companies(risk: dict) -> None:
         orientation="h",
         hover_data=["avg_urgency", "urgent_count", "extreme_negative_count"],
     )
-    fig.update_layout(
-        margin={"t": 10, "b": 10, "l": 10, "r": 10}, height=360, xaxis_title=None, yaxis_title=None
-    )
+    fig.update_layout(margin=PLOT_MARGIN, height=360, xaxis_title=None, yaxis_title=None)
     st.plotly_chart(fig, use_container_width=True)
 
 
