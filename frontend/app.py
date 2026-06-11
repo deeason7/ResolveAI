@@ -16,6 +16,7 @@ import streamlit as st
 
 import api_client
 import auth
+import engineering_notes
 
 st.set_page_config(page_title="ResolveAI", page_icon="📨", layout="wide")
 
@@ -26,6 +27,14 @@ if api_client.is_authenticated():
         st.Page("pages/complaint_detail.py", title="Complaint Detail", icon="🔍"),
         st.Page("pages/analytics.py", title="Analytics", icon="📈"),
     ]
+else:
+    pages = [st.Page(auth.render_login_page, title="Sign in", icon="🔒")]
+
+# Created before the sidebar so the engineering-notes panel can key off the
+# page the visitor is actually on (nav is the selected st.Page).
+nav = st.navigation(pages)
+
+if api_client.is_authenticated():
     with st.sidebar:
         if api_client.is_demo():
             st.caption("**Demo mode** — read-only guided tour")
@@ -34,10 +43,9 @@ if api_client.is_authenticated():
             user = api_client.current_user() or {}
             st.caption(f"Signed in as **{user.get('full_name', 'unknown')}**")
             signout_label = "Sign out"
+        engineering_notes.render(nav.title)
         if st.button(signout_label, use_container_width=True):
             api_client.logout()
             st.rerun()
-else:
-    pages = [st.Page(auth.render_login_page, title="Sign in", icon="🔒")]
 
-st.navigation(pages).run()
+nav.run()

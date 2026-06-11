@@ -24,7 +24,8 @@ drafts a regulator-aware response → a **four-layer guardrail engine** validate
 draft → a **human reviewer** approves or rejects it. This dashboard is the human's seat.
 
 You're in a **read-only demo session** — look at everything, the write buttons are
-politely disabled.
+politely disabled. 💡 Every page also has **🛠️ Under the hood** in the sidebar:
+the architectural decisions behind exactly what you're looking at.
 """
 
 _PAGES = {
