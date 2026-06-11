@@ -81,9 +81,45 @@ _PAGES = {
   company's risk score and linked regulation violations from the **Neo4j knowledge
   graph**. Two stores, one table; every column's source is in the caption.
 
-That's the tour. On the roadmap next: a **Graph Explorer** for the knowledge graph and
-an **LLMOps Observatory** — cost, latency and routing telemetry for every model call
-the system makes. Thanks for looking around!
+→ Next: **Graph Explorer** — walk that knowledge graph visually.
+""",
+    "graph_explorer": """
+**Graph Explorer — the knowledge graph, live.**
+
+Companies, products, issues, regulations and resolution patterns live in a **Neo4j
+graph** seeded from the complaint corpus; the agent queries it for regulations and
+company history when drafting responses.
+
+- **Search any node** — a company ("EQUIFAX, INC."), product, issue, or regulation —
+  and the canvas renders its neighborhood out to the depth you pick (capped at 3:
+  this graph is dense, and unbounded traversals would pull most of it back).
+- **Drag, zoom, hover** for node properties; colors mark the node type (legend above
+  the canvas).
+- **Inspect panel** — pick a node for its details (companies show live complaint
+  totals and risk score) and hit *Explore from here* to re-center the graph on it.
+
+→ Last stop: **LLMOps Observatory** — what the AI itself costs, how fast it runs,
+and every guardrail catch.
+""",
+    "llmops": """
+**LLMOps Observatory — the dashboard about the models themselves.**
+
+Every model call this system makes is metered into a log with provider, tokens, cost
+and latency. This page is that telemetry:
+
+- **Spend** — daily bars per provider with a cumulative line; the whole demo corpus
+  was classified for pennies.
+- **Call routing** — local fine-tuned model vs cloud vs the **fail-closed path**
+  (when no provider answers, complaints get flagged maximum-severity for humans
+  instead of guessed labels — red in the donut, by design).
+- **Latency by operation** — p50/p95, log scale, because local CPU inference and
+  cloud calls live in different worlds.
+- **Classifier output over time** — drift watch, bucketed by when calls actually ran.
+- **Guardrail violation log** — every rule the validation engine has tripped,
+  filterable by layer.
+
+That's the full tour — thanks for looking around! The sidebar's **🛠️ Under the
+hood** has the architecture story for every page you just saw.
 """,
 }
 

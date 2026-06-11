@@ -102,6 +102,51 @@ risk columns and raises a counted warning — it doesn't kill the page.
 complaints the current resolution count would be statistical noise, and the
 caption says exactly that instead of charting it.
 """,
+    "Graph Explorer": """
+**Bounded traversals.** The backend caps depth at 3 — every hop fans out
+across a dense company/product/issue web, and an unbounded walk would pull
+most of the graph into one response.
+
+**APOC subgraph in one query.** `apoc.path.subgraphAll` returns the whole
+neighborhood in a single round-trip, shaped as loose node/edge dicts so the
+frontend renders generically and the wire contract doesn't chase every
+label's property set.
+
+**Framework-decoupled rendering.** pyvis generates a self-contained vis.js
+HTML document (`cdn_resources="in_line"`) embedded as a component — no
+coupling to Streamlit's custom-component API, so Streamlit upgrades can't
+break the canvas. The tradeoff: clicks stay in the browser, so re-centering
+goes through the inspect panel instead of the node itself.
+
+**One-shot recenter.** "Explore from here" hands the node off via a popped
+session key applied before the search widget instantiates — the same
+handoff pattern the triage→detail flow uses.
+
+**Live cross-checks.** A company node's panel numbers come from the same
+graph the agent queries when drafting — what you see is what the agent saw.
+""",
+    "LLMOps Observatory": """
+**Metered at the source.** Workers write one llm_logs row per model call —
+provider, model, tokens, cost, latency, fallback flag — inside the same
+transaction as the work itself, so telemetry can't drift from reality.
+
+**Aggregate where portable, compute where not.** Daily groupings are SQL;
+percentiles are Python because SQLite (tests) lacks percentile_cont, and
+the table is bounded at one row per call.
+
+**Two failure stories, never merged.** Provider `none` is the deterministic
+fail-closed path (nothing answered → flag maximum severity for humans);
+`was_fallback` marks cloud covering for local. A routing chart that mixed
+them would hide exactly the distinction that matters.
+
+**Drift on the classify clock.** The distribution chart buckets by when
+classify calls ran, not the complaint's event date — that's the clock drift
+monitoring actually cares about.
+
+**Violation log is row-level on purpose.** Reviewers read individual
+guardrail catches; the resolutions table is one row per draft version, so
+flattening its JSON violations in Python stays cheap by construction.
+""",
 }
 
 
