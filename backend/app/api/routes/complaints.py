@@ -4,6 +4,7 @@ Complaint endpoints:
   GET    /complaints/             — paginated list with filters
   GET    /complaints/queue        — priority-sorted triage queue
   GET    /complaints/{id}         — fetch one
+  GET    /complaints/{id}/similar — top-K nearest narratives (vector search)
   POST   /complaints/             — user submits a new complaint
   POST   /complaints/bulk-import  — admin-only CSV ingest (server-side path)
 
@@ -14,6 +15,7 @@ viewer/analyst can't trigger a 200K-row insert.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import uuid
 from pathlib import Path
@@ -36,8 +38,12 @@ from app.schemas.complaint import (
     ComplaintPublic,
     ComplaintQueueItem,
     ComplaintQueueResponse,
+    SimilarComplaintItem,
+    SimilarComplaintsResponse,
 )
 from app.services.data_ingestion import ingest_cfpb_csv
+from app.services.embedder import embed_text
+from app.services.vector_store import get_default_store
 from app.workers.classification_worker import enqueue_complaint
 
 logger = logging.getLogger(__name__)
@@ -175,6 +181,56 @@ async def get_complaint(
     if complaint is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Complaint not found")
     return ComplaintPublic.model_validate(complaint)
+
+
+@router.get("/{complaint_id}/similar", response_model=SimilarComplaintsResponse)
+async def similar_complaints(
+    complaint_id: uuid.UUID,
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+    product: str | None = Query(default=None, max_length=255),
+    limit: int = Query(default=5, ge=1, le=10),
+) -> SimilarComplaintsResponse:
+    """Top-K most similar complaints, by cosine similarity of the narratives.
+
+    The complaint's own embedding lives in the collection, so it would come
+    back as hit #1 with score ~1.0 — we over-fetch by one and drop it. Hits
+    are then hydrated from Postgres (the payload is a thin search index;
+    rows deleted since indexing are silently skipped). Embedding and search
+    are sync CPU/network work, pushed off the event loop with to_thread —
+    same pattern as the agent's search_precedents tool.
+    """
+    complaint = await session.get(Complaint, complaint_id)
+    if complaint is None:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Complaint not found")
+    if not complaint.narrative or not complaint.narrative.strip():
+        return SimilarComplaintsResponse(items=[])
+
+    filters = {"product": product} if product else None
+    try:
+        vector = await asyncio.to_thread(embed_text, complaint.narrative)
+        store = get_default_store()
+        hits = await asyncio.to_thread(store.search_similar, vector, filters, limit + 1)
+    except Exception:
+        # The detail page still works without this panel — degrade to 503
+        # rather than a traceback; the log keeps the real cause.
+        logger.exception("similarity search failed for %s", complaint_id)
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Similarity search is temporarily unavailable",
+        ) from None
+
+    hits = [h for h in hits if h.complaint_id != str(complaint_id)][:limit]
+    ids = [uuid.UUID(h.complaint_id) for h in hits]
+    rows = (await session.exec(select(Complaint).where(Complaint.id.in_(ids)))).all()
+    by_id = {c.id: c for c in rows}
+    return SimilarComplaintsResponse(
+        items=[
+            SimilarComplaintItem.from_hit(by_id[i], h.score)
+            for i, h in zip(ids, hits, strict=True)
+            if i in by_id
+        ]
+    )
 
 
 @router.post("/", response_model=ComplaintPublic, status_code=status.HTTP_201_CREATED)
