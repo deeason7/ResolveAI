@@ -4,14 +4,13 @@ Per-page "under the hood" notes for the sidebar.
 The pages demo the product; this panel demos the engineering. Each page
 gets the architectural decisions behind it — what was chosen, what it beat,
 and why — so a visitor or an interviewer sees the reasoning, not just the
-pixels. Auto-expanded in demo sessions, tucked away for daily work.
+pixels. Collapsed by default everywhere: business value leads, and the
+tour's final step points the curious here.
 """
 
 from __future__ import annotations
 
 import streamlit as st
-
-import api_client
 
 _STACK_FOOTER = (
     "Auth: short-lived JWT + httpOnly rotating refresh cookie, silent re-auth "
@@ -155,6 +154,6 @@ def render(page_title: str) -> None:
     notes = _NOTES.get(page_title)
     if not notes:
         return
-    with st.expander("🛠️ Under the hood", expanded=api_client.is_demo()):
+    with st.expander("🛠️ Under the hood", expanded=False):
         st.markdown(notes)
         st.caption(_STACK_FOOTER)

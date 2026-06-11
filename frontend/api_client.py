@@ -109,7 +109,9 @@ def current_user() -> dict | None:
 
 
 def clear_session() -> None:
-    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY):
+    # "tour_step" belongs to tour.py — popped here so a demo logout fully
+    # resets the guided tour (importing tour would be circular).
+    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step"):
         st.session_state.pop(key, None)
 
 
