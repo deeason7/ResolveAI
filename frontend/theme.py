@@ -24,3 +24,6 @@ SENTIMENT_BADGES = {
 
 # Plotly default margins drown small charts in whitespace.
 PLOT_MARGIN = {"t": 10, "b": 10, "l": 10, "r": 10}
+
+# Tooltip for action buttons disabled in read-only demo sessions.
+DEMO_HINT = "Read-only demo — sign in to take actions"

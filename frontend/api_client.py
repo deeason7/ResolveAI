@@ -27,6 +27,13 @@ TIMEOUT_S = 30.0
 _CLIENT_KEY = "_http_client"
 _TOKEN_KEY = "access_token"
 _USER_KEY = "user"
+_DEMO_KEY = "demo_mode"
+
+# Shared walk-up account for recruiters/visitors who won't register. Its
+# credentials are deliberately not secret — it can do nothing a self-registered
+# account couldn't, and the UI runs demo sessions read-only on top.
+DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "demo@resolveai-demo.com")
+DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo-resolveai-2026")
 
 
 class ApiError(Exception):
@@ -102,8 +109,28 @@ def current_user() -> dict | None:
 
 
 def clear_session() -> None:
-    for key in (_TOKEN_KEY, _USER_KEY):
+    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY):
         st.session_state.pop(key, None)
+
+
+def is_demo() -> bool:
+    return bool(st.session_state.get(_DEMO_KEY))
+
+
+def start_demo() -> None:
+    """Sign in as the shared demo account, creating it on first use.
+
+    Self-healing on a fresh database: login 401 → register → proceed. Anyone
+    could do the same through the open register endpoint, so this adds no new
+    surface — it just removes the form for people who only want to look.
+    """
+    try:
+        login(DEMO_EMAIL, DEMO_PASSWORD)
+    except ApiError as exc:
+        if exc.status_code != 401:
+            raise
+        register(DEMO_EMAIL, "Demo Viewer", DEMO_PASSWORD)
+    st.session_state[_DEMO_KEY] = True
 
 
 def login(email: str, password: str) -> None:
