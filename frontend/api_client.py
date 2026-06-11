@@ -201,6 +201,36 @@ def company_profile(name: str) -> dict:
     return _request("GET", f"/graph/company/{quote(name, safe='')}").json()
 
 
+def graph_explore(node_id: str, depth: int = 2) -> dict:
+    return _request("GET", "/graph/explore", params={"node_id": node_id, "depth": depth}).json()
+
+
+# ── llmops ────────────────────────────────────────────────────────────────────
+
+
+def llmops_costs(days: int = 90) -> dict:
+    return _request("GET", "/llmops/costs", params={"days": days}).json()
+
+
+def llmops_latency(days: int = 90) -> dict:
+    return _request("GET", "/llmops/latency", params={"days": days}).json()
+
+
+def llmops_routing(days: int = 90) -> dict:
+    return _request("GET", "/llmops/routing", params={"days": days}).json()
+
+
+def llmops_drift(days: int = 90) -> dict:
+    return _request("GET", "/llmops/drift", params={"days": days}).json()
+
+
+def llmops_guardrails(layer: str | None = None, limit: int = 100) -> dict:
+    params: dict[str, Any] = {"limit": limit}
+    if layer:
+        params["layer"] = layer
+    return _request("GET", "/llmops/guardrails", params=params).json()
+
+
 # ── analytics ─────────────────────────────────────────────────────────────────
 
 
