@@ -18,6 +18,21 @@ def render_login_page() -> None:
     st.title("ResolveAI")
     st.caption("Intelligent complaint resolution — sign in to continue")
 
+    with st.container(border=True):
+        st.markdown("**👀 Just looking around?**")
+        st.caption(
+            "Take a guided tour of the live system — 200,000 real CFPB complaints, "
+            "AI triage, precedent search, and agent-drafted resolutions. "
+            "No account needed; demo sessions are read-only."
+        )
+        if st.button("🚀 Launch the demo", type="primary", use_container_width=True):
+            try:
+                api_client.start_demo()
+            except api_client.ApiError as exc:
+                st.error(f"Demo unavailable: {exc.detail}")
+            else:
+                st.rerun()
+
     signin_tab, register_tab = st.tabs(["Sign in", "Create account"])
 
     with signin_tab, st.form("signin"):

@@ -13,8 +13,9 @@ import pandas as pd
 import streamlit as st
 
 import api_client
+import tour
 from api_client import ApiError
-from theme import SENTIMENT_BADGES
+from theme import DEMO_HINT, SENTIMENT_BADGES
 
 STATUS_OPTIONS = [
     "all actionable",
@@ -103,11 +104,18 @@ def _action_panel(item: dict) -> None:
         )
         st.write(item["narrative_preview"] + ("…" if len(item["narrative_preview"]) == 200 else ""))
 
+        demo = api_client.is_demo()
         opener, trigger, hint = st.columns([1, 1, 2])
         if opener.button("🔍 Open detail", use_container_width=True):
             st.session_state["detail_complaint_id"] = item["id"]
             st.switch_page("pages/complaint_detail.py")
-        if trigger.button("⚙️ Generate resolution", type="primary", use_container_width=True):
+        if trigger.button(
+            "⚙️ Generate resolution",
+            type="primary",
+            use_container_width=True,
+            disabled=demo,
+            help=DEMO_HINT if demo else None,
+        ):
             try:
                 api_client.generate_resolution(item["id"])
             except ApiError as exc:
@@ -123,6 +131,7 @@ def _action_panel(item: dict) -> None:
 
 
 st.title("📋 Triage Queue")
+tour.render("triage_queue")
 
 try:
     params = _filters()

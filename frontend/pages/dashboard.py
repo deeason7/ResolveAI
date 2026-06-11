@@ -21,6 +21,7 @@ import plotly.express as px
 import streamlit as st
 
 import api_client
+import tour
 from api_client import ApiError
 from theme import PLOT_MARGIN, SENTIMENT_COLORS
 
@@ -147,6 +148,7 @@ def _recent_activity() -> None:
 
 
 st.title("📊 Dashboard")
+tour.render("dashboard")
 
 try:
     trends = api_client.sentiment_trends(days=365)

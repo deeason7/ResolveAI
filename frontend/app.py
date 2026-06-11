@@ -27,9 +27,14 @@ if api_client.is_authenticated():
         st.Page("pages/analytics.py", title="Analytics", icon="📈"),
     ]
     with st.sidebar:
-        user = api_client.current_user() or {}
-        st.caption(f"Signed in as **{user.get('full_name', 'unknown')}**")
-        if st.button("Sign out", use_container_width=True):
+        if api_client.is_demo():
+            st.caption("**Demo mode** — read-only guided tour")
+            signout_label = "Exit demo"
+        else:
+            user = api_client.current_user() or {}
+            st.caption(f"Signed in as **{user.get('full_name', 'unknown')}**")
+            signout_label = "Sign out"
+        if st.button(signout_label, use_container_width=True):
             api_client.logout()
             st.rerun()
 else:

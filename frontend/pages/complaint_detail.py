@@ -14,8 +14,9 @@ import pandas as pd
 import streamlit as st
 
 import api_client
+import tour
 from api_client import ApiError
-from theme import SENTIMENT_BADGES
+from theme import DEMO_HINT, SENTIMENT_BADGES
 
 HANDOFF_KEY = "detail_complaint_id"
 ID_INPUT_KEY = "detail_id_input"
@@ -118,7 +119,13 @@ def _similar_panel(c: dict) -> None:
 
 
 def _generate_button(c: dict) -> None:
-    if st.button("⚙️ Generate resolution", type="primary"):
+    demo = api_client.is_demo()
+    if st.button(
+        "⚙️ Generate resolution",
+        type="primary",
+        disabled=demo,
+        help=DEMO_HINT if demo else None,
+    ):
         try:
             api_client.generate_resolution(c["id"])
         except ApiError as exc:
@@ -156,8 +163,15 @@ def _reasoning(res: dict) -> None:
 
 
 def _review_actions(res: dict) -> None:
+    demo = api_client.is_demo()
     approve_col, reject_col, _ = st.columns([1, 1, 2])
-    if approve_col.button("✅ Approve", type="primary", use_container_width=True):
+    if approve_col.button(
+        "✅ Approve",
+        type="primary",
+        use_container_width=True,
+        disabled=demo,
+        help=DEMO_HINT if demo else None,
+    ):
         try:
             outcome = api_client.approve_resolution(res["complaint_id"])
         except ApiError as exc:
@@ -166,7 +180,12 @@ def _review_actions(res: dict) -> None:
             st.toast(f"Approved v{outcome['version']} — complaint is now resolved.")
             st.rerun()
 
-    with reject_col.popover("❌ Reject…", use_container_width=True):
+    with reject_col.popover(
+        "❌ Reject…",
+        use_container_width=True,
+        disabled=demo,
+        help=DEMO_HINT if demo else None,
+    ):
         with st.form("reject_form", border=False):
             feedback = st.text_area(
                 "What's wrong, and what must the next draft fix?",
@@ -219,6 +238,7 @@ def _resolution_panel(c: dict) -> None:
 
 
 st.title("🔍 Complaint Detail")
+tour.render("complaint_detail")
 
 handoff = st.session_state.pop(HANDOFF_KEY, None)
 if handoff:

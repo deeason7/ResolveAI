@@ -15,6 +15,7 @@ import plotly.express as px
 import streamlit as st
 
 import api_client
+import tour
 from api_client import ApiError
 from theme import PLOT_MARGIN, SENTIMENT_COLORS
 
@@ -141,6 +142,7 @@ def _risk_scorecard() -> None:
 
 
 st.title("📈 Analytics")
+tour.render("analytics")
 
 try:
     _weekly_trend()
