@@ -67,9 +67,16 @@ def _sentiment_donut(df: pd.DataFrame, anchor: pd.Timestamp) -> None:
     )
     start = anchor - timedelta(days=days - 1)
     mask = (df["day"] >= start) & (df["day"] <= anchor)
-    window = df[mask].groupby("sentiment", as_index=False)["count"].sum()
+    # Exclude "unclassified": a sentiment *distribution* should show the labels we have,
+    # not be swamped by the as-yet-unlabelled backlog (the coverage metric above already
+    # reports how much of the corpus is classified).
+    window = (
+        df[mask & (df["sentiment"] != "unclassified")]
+        .groupby("sentiment", as_index=False)["count"]
+        .sum()
+    )
     if window.empty:
-        st.info("No complaints in this window.")
+        st.info("No classified complaints in this window yet — run a batch from ⚙️ Workspace.")
         return
     fig = px.pie(
         window,
