@@ -19,7 +19,7 @@ import logging
 from datetime import datetime
 
 import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -27,6 +27,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.config import settings
 from app.core.deps import get_current_user, get_redis
 from app.database import get_session
+from app.middleware.rate_limit import limiter
 from app.models.complaint import Complaint, ComplaintStatus
 from app.models.user import User
 from app.schemas.workspace import EnqueueResult, StreamInfo, WorkspaceBoard
@@ -38,6 +39,13 @@ router = APIRouter(prefix="/workspace", tags=["workspace"])
 
 # Cap per enqueue so one click can't flood a stream with the whole 200K backlog.
 _BATCH_MAX = 500
+
+# These two routes each kick off real work (up to _BATCH_MAX XADDs, and for
+# resolution a same-transaction status flip on every row). They ride the global
+# 200/min like everything else, but also get a tighter dedicated cap so a stuck
+# client or a refresh loop can't machine-gun batches. The board GET stays on the
+# global limit — it's a cheap read meant for polling.
+_ENQUEUE_RATE_LIMIT = "10/minute"
 
 
 async def _stream_info(redis: aioredis.Redis, stream: str) -> StreamInfo:
@@ -93,7 +101,9 @@ async def board(
 
 
 @router.post("/enqueue/classification", response_model=EnqueueResult)
+@limiter.limit(_ENQUEUE_RATE_LIMIT)
 async def enqueue_classification(
+    request: Request,  # required by slowapi's per-route limiter for the key func
     limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
@@ -118,7 +128,9 @@ async def enqueue_classification(
 
 
 @router.post("/enqueue/resolution", response_model=EnqueueResult)
+@limiter.limit(_ENQUEUE_RATE_LIMIT)
 async def enqueue_resolution_batch(
+    request: Request,  # required by slowapi's per-route limiter for the key func
     limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),

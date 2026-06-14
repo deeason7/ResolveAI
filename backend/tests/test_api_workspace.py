@@ -154,6 +154,20 @@ async def test_board_requires_auth(factory, fake_redis):
 
 
 @pytest.mark.asyncio
+async def test_enqueue_is_rate_limited(factory, fake_redis):
+    """Enqueue carries a tighter per-route cap (10/min) than the global 200/min.
+    The 11th call in a window is rejected with 429 — the autouse limiter reset
+    guarantees this test starts from a clean window."""
+    app = _build_app(factory, fake_redis)
+    async with _client(app) as ac:
+        for _ in range(10):
+            ok = await ac.post(CLASSIFY_URL, params={"limit": 1})
+            assert ok.status_code == 200
+        limited = await ac.post(CLASSIFY_URL, params={"limit": 1})
+    assert limited.status_code == 429
+
+
+@pytest.mark.asyncio
 async def test_board_survives_stream_telemetry_failure(factory, fake_redis):
     """Redis telemetry is best-effort: if introspection raises, the board still
     returns its durable DB counts with the stream fields degraded to zero / None."""
