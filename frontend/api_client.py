@@ -56,11 +56,48 @@ def _http() -> httpx.Client:
     return st.session_state[_CLIENT_KEY]
 
 
+def _humanize_validation(errors: list[Any]) -> str:
+    """Translate FastAPI's 422 validation list into plain language.
+
+    The raw payload — e.g. ``[{'type': 'value_error', 'loc': ['body', 'email'],
+    'msg': 'value is not a valid email address: ...'}]`` — is for developers;
+    users get one readable sentence per offending field instead of dict syntax.
+    """
+    parts: list[str] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            parts.append(str(err))
+            continue
+        loc = err.get("loc") or []
+        # loc is like ["body", "email"]; the last hop is the field name.
+        field = str(loc[-1]) if loc else ""
+        if field == "email":
+            parts.append("Please enter a valid email address.")
+            continue
+        label = field.replace("_", " ").capitalize() if field else "Input"
+        # Pydantic v2 prefixes custom-validator messages with "Value error, ".
+        msg = str(err.get("msg", "is invalid"))
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        parts.append(f"{label}: {msg}")
+    return " ".join(parts) if parts else "Please check your input and try again."
+
+
 def _detail(resp: httpx.Response) -> str:
+    """Best human-readable explanation for a failed response.
+
+    FastAPI returns a plain-string ``detail`` for HTTPExceptions (already
+    user-facing) but a structured *list* for 422 validation errors — the latter
+    is run through ``_humanize_validation`` instead of being str()'d into a wall
+    of dict syntax.
+    """
     try:
-        return str(resp.json().get("detail", resp.text))
+        detail = resp.json().get("detail", resp.text)
     except ValueError:
         return resp.text or f"HTTP {resp.status_code}"
+    if isinstance(detail, list):
+        return _humanize_validation(detail)
+    return str(detail)
 
 
 def _try_refresh() -> bool:
@@ -271,3 +308,18 @@ def reject_resolution(complaint_id: str, feedback: str) -> dict:
     return _request(
         "POST", f"/resolutions/{complaint_id}/reject", json={"feedback": feedback}
     ).json()
+
+
+# ── workspace ─────────────────────────────────────────────────────────────────
+
+
+def workspace_board() -> dict:
+    return _request("GET", "/workspace/board").json()
+
+
+def enqueue_classification(limit: int = 50) -> dict:
+    return _request("POST", "/workspace/enqueue/classification", params={"limit": limit}).json()
+
+
+def enqueue_resolution_batch(limit: int = 50) -> dict:
+    return _request("POST", "/workspace/enqueue/resolution", params={"limit": limit}).json()

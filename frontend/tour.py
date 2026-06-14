@@ -78,6 +78,16 @@ STEPS = [
         "try": "Search any company, pick a node, and **🧭 Explore from here**.",
     },
     {
+        "page": "workspace",
+        "file": "pages/workspace.py",
+        "title": "The engine room",
+        "body": "Every complaint rides one line — queued → classified → in resolution → "
+        "human review → resolved — and this board shows how many sit at each stage right "
+        "now. It doubles as the control panel: feed a batch in and watch the counts move.",
+        "try": "Watch the **Pipeline** row — each case sits at exactly one stage. "
+        "(Enqueueing is read-only in the demo.)",
+    },
+    {
         "page": "llmops",
         "file": "pages/llmops.py",
         "title": "AI you can govern",
