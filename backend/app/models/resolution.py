@@ -40,7 +40,8 @@ class Resolution(SQLModel, table=True):
         sa_type=JSON().with_variant(JSONB(), "postgresql"),
     )
 
-    # Agent reasoning trace (JSON string — kept short for the DB, full trace in LLMLog)
+    # Agent reasoning trace: newline-joined chain-of-thought steps (not JSON),
+    # kept short for the DB; the full per-call trace lives in LLMLog.
     reasoning_summary: str | None = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
