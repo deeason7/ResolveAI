@@ -19,7 +19,7 @@ from typing import Generic, TypeVar
 
 import httpx
 import instructor
-from openai import APIConnectionError, APIError, APITimeoutError, OpenAI
+from openai import APIConnectionError, APIError, APITimeoutError, OpenAI, RateLimitError
 from pydantic import BaseModel
 
 from app.config import Settings
@@ -37,6 +37,32 @@ except Exception:  # pragma: no cover - import path moved across versions
 
 # Bound to BaseModel so every caller hands us a validatable schema.
 T = TypeVar("T", bound=BaseModel)
+
+# Hard ceiling on a single rate-limit backoff. A malformed or hostile
+# Retry-After header can't park a worker thread for minutes; past this we'd
+# rather give up to the fallback chain.
+_MAX_BACKOFF_S = 60.0
+
+
+def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
+    """Seconds to wait before retrying a 429, honoring the provider's hint.
+
+    Groq and OpenAI return a ``Retry-After`` header (seconds) on a rate-limit
+    429 — the server knows when our window resets, so we obey it rather than
+    guessing with blind exponential backoff. Missing or unparseable (e.g. the
+    HTTP-date form, which we don't bother decoding) falls back to ``default``.
+    Always clamped to ``[0, _MAX_BACKOFF_S]``.
+    """
+    response = getattr(exc, "response", None)
+    headers = getattr(response, "headers", None) or {}
+    raw = headers.get("retry-after")
+    wait = default
+    if raw is not None:
+        try:
+            wait = float(raw)
+        except (TypeError, ValueError):
+            wait = default
+    return max(0.0, min(wait, _MAX_BACKOFF_S))
 
 
 class Provider(str, Enum):
@@ -184,14 +210,39 @@ class LLMClient:
         temperature: float,
     ) -> LLMResponse[T]:
         client = self._clients[cfg.provider]
-        started = time.perf_counter()
-        obj, completion = client.chat.completions.create_with_completion(
-            model=cfg.model,
-            messages=messages,
-            response_model=response_model,
-            max_retries=retries,
-            temperature=temperature,
-        )
+        # Same-provider retry budget for 429s only. We sit inside _attempt (one
+        # provider) rather than structured() (the cross-provider chain) because
+        # a rate limit means "this provider is fine, just wait" — not "this
+        # provider is down, move on". `started` is taken per iteration and only
+        # read after success, so the reported latency is the winning call's
+        # wall time, excluding the backoff sleeps (which aren't model latency).
+        attempt = 0
+        while True:
+            started = time.perf_counter()
+            try:
+                obj, completion = client.chat.completions.create_with_completion(
+                    model=cfg.model,
+                    messages=messages,
+                    response_model=response_model,
+                    max_retries=retries,
+                    temperature=temperature,
+                )
+                break
+            except RateLimitError as exc:
+                if attempt >= self.settings.llm_rate_limit_retries:
+                    # Budget exhausted — re-raise so structured() can fall back
+                    # to the next provider (or surface LLMUnavailableError).
+                    raise
+                wait_s = _retry_after_seconds(exc, self.settings.llm_rate_limit_backoff_s)
+                logger.warning(
+                    "provider %s rate-limited (429); backing off %.1fs then retrying (%d/%d)",
+                    cfg.provider.value,
+                    wait_s,
+                    attempt + 1,
+                    self.settings.llm_rate_limit_retries,
+                )
+                time.sleep(wait_s)
+                attempt += 1
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = getattr(completion, "usage", None)
