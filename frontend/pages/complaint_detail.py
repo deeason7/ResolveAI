@@ -248,7 +248,21 @@ complaint_id = st.text_input(
 )
 
 if not complaint_id:
-    st.info("Open a complaint from the Triage Queue, or paste its ID above.")
+    st.info(
+        "Open a complaint from the Triage Queue, paste a UUID above, or load a real "
+        "example to watch the full pipeline — classification, precedent search, and an "
+        "agent-drafted resolution."
+    )
+    if st.button("🎲 Load an example complaint", type="primary"):
+        try:
+            items = api_client.triage_queue().get("items", [])
+        except ApiError as exc:
+            st.error(f"Couldn't load an example: {exc.detail}")
+        else:
+            if items:
+                _open_complaint(items[0]["id"])
+            else:
+                st.warning("No classified complaints yet — run a batch from ⚙️ Workspace first.")
     st.stop()
 
 try:
