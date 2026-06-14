@@ -30,6 +30,7 @@ from app.workers.classification_worker import (
     enqueue_complaint,
     is_high_priority,
 )
+from app.workers.stream_utils import reclaim_stale_messages
 
 EMBED_DIM = 384
 
@@ -240,3 +241,32 @@ class TestStreamIntegration:
         await w._handle(message_id, fields)
         summary = await redis_client.xpending(w.stream, w.group)
         assert summary["pending"] == 0
+
+    async def test_reclaims_message_stranded_by_dead_consumer(
+        self, redis_client, factory, vector_store
+    ):
+        # A different consumer reads the message and 'dies' without acking, so it
+        # sits in the PEL. The reclaimer hands it to THIS worker's _handle, which
+        # runs the real classify + persist + ack path.
+        cid = await _seed(factory)
+        w = _worker(redis_client, factory, vector_store, _outcome(urgency=3))
+        await w.ensure_group()
+        await enqueue_complaint(redis_client, cid, stream=w.stream)
+        await redis_client.xreadgroup(
+            groupname=w.group, consumername="dead-worker", streams={w.stream: ">"}, count=10
+        )
+        assert (await redis_client.xpending(w.stream, w.group))["pending"] == 1
+
+        reclaimed = await reclaim_stale_messages(
+            redis_client,
+            stream=w.stream,
+            group=w.group,
+            consumer=w.consumer,
+            handle=w._handle,
+            min_idle_ms=0,
+        )
+        assert reclaimed == 1
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.classified  # processed end-to-end
+        assert (await redis_client.xpending(w.stream, w.group))["pending"] == 0  # acked, PEL clear
