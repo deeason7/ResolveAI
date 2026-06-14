@@ -146,6 +146,24 @@ monitoring actually cares about.
 guardrail catches; the resolutions table is one row per draft version, so
 flattening its JSON violations in Python stays cheap by construction.
 """,
+    "Workspace": """
+**Durable truth, transient overlay.** Stage counts read `complaint.status` —
+the signal the workers write in the *same transaction* as the work — so the
+board is always exact. Redis stream state (waiting / in-flight / workers) is
+layered on top, best-effort: the moving picture over the settled one.
+
+**One producer, many callers.** Enqueueing reuses the exact XADD functions the
+submit and per-complaint generate routes already use — a single definition of
+each stream's message shape, never a second copy.
+
+**At-least-once by design.** A complaint stays `pending` until a worker
+classifies it, so re-enqueuing an unprocessed one just re-runs it, never
+corrupts it. The resolution batch flips escalated -> agent_triggered first, so
+a re-run can't double-draft the same case.
+
+**Bounded blast radius.** One enqueue is capped at 500 — a single click can't
+flood the stream with the whole 200K backlog.
+""",
 }
 
 
