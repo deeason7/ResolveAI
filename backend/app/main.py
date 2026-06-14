@@ -16,7 +16,7 @@ from fastapi.responses import JSONResponse
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
-from app.api.routes import analytics, auth, complaints, graph, llmops, resolutions
+from app.api.routes import analytics, auth, complaints, graph, llmops, resolutions, workspace
 from app.config import settings
 from app.core.deps import get_default_redis
 from app.middleware.rate_limit import limiter
@@ -84,6 +84,7 @@ def create_app() -> FastAPI:
     app.include_router(graph.router, prefix="/api/v1")
     app.include_router(llmops.router, prefix="/api/v1")
     app.include_router(resolutions.router, prefix="/api/v1")
+    app.include_router(workspace.router, prefix="/api/v1")
 
     @app.get("/api/v1/health", tags=["infra"])
     async def health() -> dict:
