@@ -4,8 +4,9 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import String
 from sqlmodel import Field, SQLModel
+
+from app.models.types import EnumString
 
 
 class ComplaintStatus(str, Enum):
@@ -50,13 +51,13 @@ class Complaint(SQLModel, table=True):
     date_received: datetime | None = None
 
     # Classification outputs (filled by the SLM worker)
-    # sa_type=String(50) keeps the Python enum for type safety but stores as
-    # VARCHAR — matches the initial migration, avoids a native Postgres enum
-    # type and the migration overhead that comes with it.
+    # EnumString stores the enum as VARCHAR (matches the initial migration, no
+    # native Postgres enum / migration overhead) and round-trips it back as the
+    # enum, so reads carry .value and need no isinstance() guards.
     status: ComplaintStatus = Field(
         default=ComplaintStatus.pending,
         index=True,
-        sa_type=String(50),
+        sa_type=EnumString(ComplaintStatus),
     )
     sentiment: str | None = Field(default=None, max_length=50)
     intent: str | None = Field(default=None, max_length=100)

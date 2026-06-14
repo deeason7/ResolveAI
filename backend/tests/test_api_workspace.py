@@ -132,7 +132,7 @@ async def test_enqueue_resolution_flips_escalated(factory, fake_redis):
     assert r.json()["enqueued"] == 2
     assert await fake_redis.xlen(settings.resolution_queue) == 2
     async with factory() as s:
-        statuses = [str(v) for v in (await s.exec(select(Complaint.status))).all()]
+        statuses = [v.value for v in (await s.exec(select(Complaint.status))).all()]
     assert statuses.count(ComplaintStatus.agent_triggered.value) == 2
     assert statuses.count(ComplaintStatus.classified.value) == 5
 
@@ -225,7 +225,7 @@ async def test_enqueue_resolution_rolls_back_flips_when_xadd_fails(
     assert r.status_code == 500
 
     async with factory() as s:
-        statuses = [str(v) for v in (await s.exec(select(Complaint.status))).all()]
+        statuses = [v.value for v in (await s.exec(select(Complaint.status))).all()]
     assert statuses.count(ComplaintStatus.escalated.value) == 3
     assert statuses.count(ComplaintStatus.agent_triggered.value) == 0
     assert await fake_redis.xlen(settings.resolution_queue) == 0

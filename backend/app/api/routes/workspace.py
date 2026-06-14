@@ -81,7 +81,9 @@ async def board(
             select(Complaint.status, func.count(Complaint.id)).group_by(Complaint.status)
         )
     ).all()
-    counts = {str(status_value): count for status_value, count in rows}
+    # status round-trips as the enum (EnumString), so key on .value — str(enum)
+    # would yield "ComplaintStatus.pending" on 3.11 and miss every lookup.
+    counts = {status_value.value: count for status_value, count in rows}
 
     def n(stage: ComplaintStatus) -> int:
         return int(counts.get(stage.value, 0))

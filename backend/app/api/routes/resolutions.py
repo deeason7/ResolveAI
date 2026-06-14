@@ -46,11 +46,10 @@ router = APIRouter(prefix="/resolutions", tags=["resolutions"])
 def _status_value(complaint: Complaint) -> str:
     """Complaint status as its value string.
 
-    Rows loaded from the DB carry plain str (the column is VARCHAR); freshly
-    assigned objects carry the enum. Comparing on values handles both.
+    EnumString round-trips the column as the enum in both directions, so this is
+    always ``.value`` — no isinstance() guard needed.
     """
-    s = complaint.status
-    return s.value if isinstance(s, ComplaintStatus) else s
+    return complaint.status.value
 
 
 async def _complaint_or_404(session: AsyncSession, complaint_id: uuid.UUID) -> Complaint:

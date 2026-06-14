@@ -260,11 +260,8 @@ class ResolutionWorker:
                 logger.warning("complaint %s not found; dropping", complaint_id)
                 return  # poison -> ack
 
-            status_value = (
-                complaint.status.value
-                if isinstance(complaint.status, ComplaintStatus)
-                else complaint.status
-            )
+            # EnumString round-trips status as the enum, so .value is always safe.
+            status_value = complaint.status.value
             if status_value in _SKIP_WITHOUT_FEEDBACK and not feedback:
                 logger.info(
                     "complaint %s already %s; dropping stale trigger",

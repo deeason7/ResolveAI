@@ -16,6 +16,7 @@ import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
@@ -293,3 +294,24 @@ class TestAuthGate:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get(LATEST_URL.format(id=uuid.uuid4()))
         assert r.status_code == 401
+
+
+class TestVersionUniqueness:
+    async def test_duplicate_complaint_version_rejected(self, factory):
+        # UNIQUE(complaint_id, version) guards the max(version)+1 generation race.
+        cid = await _seed_complaint(factory)
+        await _seed_resolution(factory, cid, version=1)
+        with pytest.raises(IntegrityError):
+            await _seed_resolution(factory, cid, version=1)
+
+    async def test_same_version_different_complaints_ok(self, factory):
+        # The constraint is composite: version 1 for two different complaints is fine.
+        cid1 = await _seed_complaint(factory)
+        cid2 = await _seed_complaint(factory)
+        await _seed_resolution(factory, cid1, version=1)
+        await _seed_resolution(factory, cid2, version=1)  # must not raise
+
+    async def test_incrementing_versions_same_complaint_ok(self, factory):
+        cid = await _seed_complaint(factory)
+        await _seed_resolution(factory, cid, version=1)
+        await _seed_resolution(factory, cid, version=2)  # must not raise
