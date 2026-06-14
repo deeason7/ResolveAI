@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     redis_url: str
     classification_queue: str = "classification:queue"
     resolution_queue: str = "resolution:queue"
+    # A pending stream entry must be idle at least this long before another
+    # consumer reclaims it (XAUTOCLAIM). The threshold is the safety margin that
+    # keeps a message in-flight on a healthy worker — e.g. a multi-second LLM
+    # call — from being stolen mid-flight; only a crashed worker's orphans, idle
+    # past this, get swept up.
+    reclaim_min_idle_ms: int = 60000
 
     # Qdrant
     qdrant_host: str = "qdrant"
