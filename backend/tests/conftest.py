@@ -27,6 +27,7 @@ os.environ.setdefault("ENVIRONMENT", "test")
 
 import fakeredis
 import fakeredis.aioredis
+import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -39,6 +40,23 @@ _fake_redis_server = fakeredis.FakeServer()
 
 def _make_fake_redis(*args, **kwargs):
     return fakeredis.aioredis.FakeRedis(server=_fake_redis_server, decode_responses=True)
+
+
+@pytest.fixture(autouse=True)
+def _reset_rate_limiter():
+    """Isolate rate-limit state between tests.
+
+    The limiter is a module singleton and its dev/test backend is in-process
+    memory, so counts persist across the whole session. Without this reset a
+    long suite would eventually exhaust the global 200/min limit (every routed
+    request shares the test client's address as the key), and per-route limit
+    tests couldn't assume a clean window. Resetting the memory backend before
+    each test makes both deterministic.
+    """
+    from app.middleware.rate_limit import limiter
+
+    limiter._storage.reset()
+    yield
 
 
 @pytest_asyncio.fixture()
