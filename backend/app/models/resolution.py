@@ -4,9 +4,11 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import JSON, String, UniqueConstraint
+from sqlalchemy import JSON, UniqueConstraint
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
+
+from app.models.types import EnumString
 
 
 class GuardrailStatus(str, Enum):
@@ -31,12 +33,11 @@ class Resolution(SQLModel, table=True):
 
     version: int = Field(default=1)  # increments on re-generation
     draft_text: str
-    # sa_type=String(50): same enum-as-VARCHAR mapping as Complaint.status and
-    # User.role — without it SQLModel emits a native Postgres enum cast that
-    # doesn't match the VARCHAR column the initial migration created.
+    # EnumString: same enum-as-VARCHAR mapping as Complaint.status / User.role —
+    # stores the value, round-trips back as the enum (no isinstance() guards).
     guardrail_status: GuardrailStatus = Field(
         default=GuardrailStatus.pending,
-        sa_type=String(50),
+        sa_type=EnumString(GuardrailStatus),
     )
     guardrail_notes: str | None = None  # human-readable failure reason
     # Structured violations (schemas.guardrails.GuardrailViolation dumps), so the
