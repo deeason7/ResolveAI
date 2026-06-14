@@ -56,4 +56,4 @@ def render_login_page() -> None:
             except api_client.ApiError as exc:
                 st.error(f"Registration failed: {exc.detail}")
             else:
-                st.rerun()
+                st.success("Account created. Switch to the **Sign in** tab to log in.")

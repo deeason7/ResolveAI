@@ -169,6 +169,7 @@ def start_demo() -> None:
         if exc.status_code != 401:
             raise
         register(DEMO_EMAIL, "Demo Viewer", DEMO_PASSWORD)
+        login(DEMO_EMAIL, DEMO_PASSWORD)
     st.session_state[_DEMO_KEY] = True
 
 
@@ -181,14 +182,13 @@ def login(email: str, password: str) -> None:
 
 
 def register(email: str, full_name: str, password: str) -> None:
+    """Create an account. Does NOT sign in — the user logs in explicitly afterward."""
     resp = _http().post(
         "/auth/register",
         json={"email": email, "full_name": full_name, "password": password},
     )
     if resp.status_code != 201:
         raise ApiError(resp.status_code, _detail(resp))
-    st.session_state[_TOKEN_KEY] = resp.json()["access_token"]
-    st.session_state[_USER_KEY] = me()
 
 
 def logout() -> None:
