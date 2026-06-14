@@ -151,3 +151,67 @@ async def test_board_requires_auth(factory, fake_redis):
     async with _client(app) as ac:
         r = await ac.get(BOARD_URL)
     assert r.status_code == 401
+
+
+@pytest.mark.asyncio
+async def test_board_survives_stream_telemetry_failure(factory, fake_redis):
+    """Redis telemetry is best-effort: if introspection raises, the board still
+    returns its durable DB counts with the stream fields degraded to zero / None."""
+    await _seed(factory, pending=3, escalated=1)
+
+    async def _boom(*_a, **_k):
+        raise ConnectionError("redis telemetry down")
+
+    fake_redis.xinfo_groups = _boom  # the only Redis call _stream_info makes
+    app = _build_app(factory, fake_redis)
+    async with _client(app) as ac:
+        r = await ac.get(BOARD_URL)
+    assert r.status_code == 200
+    body = r.json()
+    # Durable counts unaffected...
+    assert body["pending"] == 3
+    assert body["escalated"] == 1
+    assert body["total"] == 4
+    # ...and the transient telemetry degrades, never errors.
+    for stream in ("classification_stream", "resolution_stream"):
+        assert body[stream]["in_flight"] == 0
+        assert body[stream]["consumers"] == 0
+        assert body[stream]["lag"] is None
+
+
+@pytest.mark.asyncio
+async def test_board_empty_db_is_all_zeros(factory, fake_redis):
+    """No complaints → every stage and the total read zero (no KeyError on the map)."""
+    app = _build_app(factory, fake_redis)
+    async with _client(app) as ac:
+        r = await ac.get(BOARD_URL)
+    assert r.status_code == 200
+    body = r.json()
+    assert body["total"] == 0
+    assert body["pending"] == body["escalated"] == body["resolved"] == 0
+
+
+@pytest.mark.asyncio
+async def test_enqueue_resolution_rolls_back_flips_when_xadd_fails(
+    factory, fake_redis, monkeypatch
+):
+    """The flips are flushed before the XADD, so if a producer call raises the whole
+    request must roll back — no complaint left stranded in agent_triggered."""
+    await _seed(factory, escalated=3)
+
+    async def _raise(*_a, **_k):
+        raise RuntimeError("stream unavailable")
+
+    # Patch the producer the route imported into its own namespace.
+    monkeypatch.setattr("app.api.routes.workspace.enqueue_resolution", _raise)
+    app = _build_app(factory, fake_redis)
+    transport = ASGITransport(app=app, raise_app_exceptions=False)
+    async with AsyncClient(transport=transport, base_url="http://test") as ac:
+        r = await ac.post(RESOLVE_URL, params={"limit": 10})
+    assert r.status_code == 500
+
+    async with factory() as s:
+        statuses = [str(v) for v in (await s.exec(select(Complaint.status))).all()]
+    assert statuses.count(ComplaintStatus.escalated.value) == 3
+    assert statuses.count(ComplaintStatus.agent_triggered.value) == 0
+    assert await fake_redis.xlen(settings.resolution_queue) == 0
