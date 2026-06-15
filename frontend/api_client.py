@@ -35,6 +35,20 @@ _DEMO_KEY = "demo_mode"
 DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "demo@resolveai-demo.com")
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo-resolveai-2026")
 
+# Read-through caching for global, read-only aggregates. These endpoints return
+# the same payload for every authenticated user — cost/latency/routing rollups,
+# graph neighborhoods, sentiment/product/company aggregates over a fixed corpus,
+# nearest-neighbour search in a static index. Because the answer doesn't depend
+# on *who* asks, one short-lived cache is shared safely across reruns, pages, and
+# even users on the same server. Live, per-pipeline reads (board, triage, a single
+# complaint/resolution) are deliberately left uncached below — they must reflect
+# the most recent write, and caching keyed on the request args (which is all
+# st.cache_data sees) can't observe a status flip the worker just made.
+#
+# Two tiers, by how fast the underlying data actually moves:
+CACHE_TTL_MONITORING_S = 300  # 5 min — LLMOps; llm_logs grows on every model call
+CACHE_TTL_REFERENCE_S = 900  # 15 min — corpus/graph aggregates, static between reseeds
+
 
 class ApiError(Exception):
     """Backend call failed. status_code 0 means the API was unreachable."""
@@ -224,6 +238,7 @@ def submit_complaint(payload: dict) -> dict:
     return _request("POST", "/complaints/", json=payload).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def similar_complaints(complaint_id: str, limit: int = 5, product: str | None = None) -> dict:
     params: dict[str, Any] = {"limit": limit}
     if product:
@@ -234,12 +249,14 @@ def similar_complaints(complaint_id: str, limit: int = 5, product: str | None = 
 # ── knowledge graph ───────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def company_profile(name: str) -> dict:
     # quote(safe="") because company names contain commas, ampersands and the
     # odd slash — an unescaped "/" would split the path and 404.
     return _request("GET", f"/graph/company/{quote(name, safe='')}").json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def graph_explore(node_id: str, depth: int = 2) -> dict:
     return _request("GET", "/graph/explore", params={"node_id": node_id, "depth": depth}).json()
 
@@ -247,22 +264,27 @@ def graph_explore(node_id: str, depth: int = 2) -> dict:
 # ── llmops ────────────────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_costs(days: int = 90) -> dict:
     return _request("GET", "/llmops/costs", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_latency(days: int = 90) -> dict:
     return _request("GET", "/llmops/latency", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_routing(days: int = 90) -> dict:
     return _request("GET", "/llmops/routing", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_drift(days: int = 90) -> dict:
     return _request("GET", "/llmops/drift", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_guardrails(layer: str | None = None, limit: int = 100) -> dict:
     params: dict[str, Any] = {"limit": limit}
     if layer:
@@ -273,14 +295,17 @@ def llmops_guardrails(layer: str | None = None, limit: int = 100) -> dict:
 # ── analytics ─────────────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def sentiment_trends(days: int = 30) -> dict:
     return _request("GET", "/analytics/sentiment/trends", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def products_breakdown() -> dict:
     return _request("GET", "/analytics/products/breakdown").json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def companies_risk(limit: int = 10) -> dict:
     return _request("GET", "/analytics/companies/risk", params={"limit": limit}).json()
 
