@@ -14,9 +14,10 @@ import streamlit as st
 
 _STACK_FOOTER = (
     "Auth: short-lived JWT + httpOnly rotating refresh cookie, silent re-auth "
-    "on 401; every page talks through one API-client seam. Stack: FastAPI · "
-    "PostgreSQL · Redis Streams · Qdrant · Neo4j · fine-tuned SLM + cloud LLM "
-    "fallback · Streamlit — fully Dockerized."
+    "on 401; every page talks through one API-client seam that memoizes read-only "
+    "aggregates (cost/latency, graph, trends) behind a short TTL while live pipeline "
+    "views stay uncached. Stack: FastAPI · PostgreSQL · Redis Streams · Qdrant · "
+    "Neo4j · fine-tuned SLM + cloud LLM fallback · Streamlit — fully Dockerized."
 )
 
 _NOTES = {
