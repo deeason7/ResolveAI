@@ -35,6 +35,7 @@ from app.schemas.complaint import (
     BulkImportRequest,
     BulkImportResponse,
     ComplaintCreate,
+    ComplaintFacets,
     ComplaintListResponse,
     ComplaintPublic,
     ComplaintQueueItem,
@@ -169,6 +170,36 @@ async def triage_queue(
         limit=limit,
         offset=offset,
     )
+
+
+@router.get("/facets", response_model=ComplaintFacets)
+async def complaint_facets(
+    session: AsyncSession = Depends(get_session),
+    _: User = Depends(get_current_user),
+) -> ComplaintFacets:
+    """Distinct product and company values, for the filter dropdowns.
+
+    Declared before /{complaint_id} so "facets" isn't parsed as a UUID — same
+    reason /queue sits up here. SELECT DISTINCT over the corpus; both lists are
+    static between reseeds, so the frontend caches them.
+    """
+    products = (
+        await session.exec(
+            select(Complaint.product)
+            .where(Complaint.product.is_not(None))
+            .distinct()
+            .order_by(Complaint.product)
+        )
+    ).all()
+    companies = (
+        await session.exec(
+            select(Complaint.company)
+            .where(Complaint.company.is_not(None))
+            .distinct()
+            .order_by(Complaint.company)
+        )
+    ).all()
+    return ComplaintFacets(products=list(products), companies=list(companies))
 
 
 @router.get("/{complaint_id}", response_model=ComplaintPublic)

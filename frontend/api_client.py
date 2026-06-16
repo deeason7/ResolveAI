@@ -230,6 +230,13 @@ def triage_queue(**filters: Any) -> dict:
     return _request("GET", "/complaints/queue", params=params).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
+def facets() -> dict:
+    """Distinct products + companies for the filter dropdowns — global and static
+    between reseeds, so it's cached like the other reference aggregates."""
+    return _request("GET", "/complaints/facets").json()
+
+
 def get_complaint(complaint_id: str) -> dict:
     return _request("GET", f"/complaints/{complaint_id}").json()
 
