@@ -676,3 +676,29 @@ class TestWriterGate:
         # the default writer role is unaffected — the gate is selective, not blanket
         r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(analyst_token))
         assert r.status_code == 201
+
+
+# ── facets (filter dropdown values) ─────────────────────────────────────────────
+
+
+class TestFacets:
+    FACETS_URL = "/api/v1/complaints/facets"
+
+    async def test_distinct_sorted_products_and_companies(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        await _seed_queue(
+            _queued(product="Mortgage", company="Acme"),
+            _queued(product="Mortgage", company="Beta"),
+            _queued(product="Credit card", company="Acme"),
+        )
+        r = await client.get(self.FACETS_URL, headers=_auth(analyst_token))
+        assert r.status_code == 200, r.text
+        body = r.json()
+        # declared before /{complaint_id}, so "facets" isn't parsed as a UUID (422)
+        assert body["products"] == ["Credit card", "Mortgage"]  # distinct + sorted
+        assert body["companies"] == ["Acme", "Beta"]
+
+    async def test_requires_auth(self, client: AsyncClient):
+        r = await client.get(self.FACETS_URL)
+        assert r.status_code == 401
