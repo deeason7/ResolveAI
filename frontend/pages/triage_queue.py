@@ -36,8 +36,12 @@ def _filters() -> dict:
     status = c1.selectbox("Status", STATUS_OPTIONS)
     sentiment = c2.selectbox("Sentiment", ["any", "neutral", "negative", "extreme_negative"])
     urgency = c3.slider("Urgency", 1, 5, (1, 5))
-    product = c4.text_input("Product (exact)", placeholder="e.g. Mortgage")
-    company = c4.text_input("Company (exact)", placeholder="e.g. EQUIFAX, INC.")
+    try:
+        opts = api_client.facets()
+    except ApiError:
+        opts = {"products": [], "companies": []}  # filters degrade; the queue still loads
+    product = c4.selectbox("Product", ["(any)", *opts["products"]])
+    company = c4.selectbox("Company", ["(any)", *opts["companies"]])
     page_size = c5.selectbox("Rows", PAGE_SIZES, index=1)
     page = c5.number_input("Page", min_value=1, value=1, step=1)
 
@@ -50,9 +54,9 @@ def _filters() -> dict:
     # would also drop rows with no urgency assigned yet.
     if urgency != (1, 5):
         params["urgency_min"], params["urgency_max"] = urgency
-    if product:
+    if product != "(any)":
         params["product"] = product
-    if company:
+    if company != "(any)":
         params["company"] = company
     return params
 
