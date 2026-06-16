@@ -67,9 +67,16 @@ def _sentiment_donut(df: pd.DataFrame, anchor: pd.Timestamp) -> None:
     )
     start = anchor - timedelta(days=days - 1)
     mask = (df["day"] >= start) & (df["day"] <= anchor)
-    window = df[mask].groupby("sentiment", as_index=False)["count"].sum()
+    # Exclude "unclassified": a sentiment *distribution* should show the labels we have,
+    # not be swamped by the as-yet-unlabelled backlog (the coverage metric above already
+    # reports how much of the corpus is classified).
+    window = (
+        df[mask & (df["sentiment"] != "unclassified")]
+        .groupby("sentiment", as_index=False)["count"]
+        .sum()
+    )
     if window.empty:
-        st.info("No complaints in this window.")
+        st.info("No classified complaints in this window yet — run a batch from ⚙️ Workspace.")
         return
     fig = px.pie(
         window,
@@ -155,25 +162,37 @@ try:
     points = pd.DataFrame(trends["points"], columns=["day", "sentiment", "count"])
     points["day"] = pd.to_datetime(points["day"])
 
-    latest = points["day"].max().date() if not points.empty else date.today()
+    # Anchor the windows on the BUSIEST day in the data, not the most recent one.
+    # The CFPB sample's final dates are sparse, so defaulting to max(day) left the
+    # 1d/7d/30d cards reading near-zero — the reference date looked disconnected
+    # from where the complaints actually are. The modal date (the day with the
+    # most complaints) lands the cards over the bulk of the corpus.
+    if points.empty:
+        busiest = latest = date.today()
+    else:
+        daily_totals = points.groupby("day")["count"].sum()
+        busiest = daily_totals.idxmax().date()  # peak-volume day -> the default
+        latest = points["day"].max().date()  # newest day, kept for the caption
+    default_anchor = busiest
     # The widget sits below the cards, so read its value from session_state:
     # a change is committed there before the rerun reaches this line.
-    anchor = pd.Timestamp(st.session_state.get("ref_date", latest))
+    anchor = pd.Timestamp(st.session_state.get("ref_date", default_anchor))
 
     _metric_cards(points, anchor)
-    if anchor.date() == latest:
+    if anchor.date() == busiest:
         st.caption(
-            f"Windows are relative to {anchor:%B %d, %Y} — the most recent complaint "
-            "on record, not today's date. Override below."
+            f"Windows are relative to {anchor:%B %d, %Y} — the busiest day on record "
+            f"(peak complaint volume), not today. Most recent is {latest:%B %d, %Y}. "
+            "Override below."
         )
     else:
         st.caption(
             f"Windows are relative to {anchor:%B %d, %Y} "
-            f"(most recent complaint: {latest:%B %d, %Y})."
+            f"(busiest day: {busiest:%B %d, %Y}; most recent: {latest:%B %d, %Y})."
         )
     ref_col, _ = st.columns([1, 4])
     with ref_col:
-        st.date_input("Reference date", value=latest, key="ref_date")
+        st.date_input("Reference date", value=default_anchor, key="ref_date")
     st.divider()
 
     left, right = st.columns(2)

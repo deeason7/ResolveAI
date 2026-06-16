@@ -235,7 +235,9 @@ async def guardrail_log(
                         complaint_id=res.complaint_id,
                         resolution_id=res.id,
                         version=res.version,
-                        guardrail_status=res.guardrail_status,
+                        # .value: the schema field is a plain str, and status now
+                        # round-trips as the enum (EnumString).
+                        guardrail_status=res.guardrail_status.value,
                         layer=violation.get("layer", "unknown"),
                         code=violation.get("code", "unknown"),
                         message=violation.get("message", ""),

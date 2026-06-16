@@ -25,6 +25,12 @@ class Settings(BaseSettings):
     redis_url: str
     classification_queue: str = "classification:queue"
     resolution_queue: str = "resolution:queue"
+    # A pending stream entry must be idle at least this long before another
+    # consumer reclaims it (XAUTOCLAIM). The threshold is the safety margin that
+    # keeps a message in-flight on a healthy worker — e.g. a multi-second LLM
+    # call — from being stolen mid-flight; only a crashed worker's orphans, idle
+    # past this, get swept up.
+    reclaim_min_idle_ms: int = 60000
 
     # Qdrant
     qdrant_host: str = "qdrant"
@@ -48,6 +54,14 @@ class Settings(BaseSettings):
     # LLM client behavior
     llm_timeout_s: float = 30.0
     classification_max_retries: int = 2
+    # Cloud providers cap free-tier throughput (Groq: ~12K tokens/min). On a 429
+    # the client honors the provider's Retry-After hint and re-tries the SAME
+    # provider up to this many times before giving up to the fallback chain — so
+    # a batch enqueue paces itself to the budget instead of fail-closing a chunk
+    # of it into degraded "manual review" classifications.
+    llm_rate_limit_retries: int = 5
+    # Wait used only when a 429 carries no usable Retry-After header.
+    llm_rate_limit_backoff_s: float = 10.0
     # Drop the local Ollama provider and go straight to the cloud fallback.
     # Default off (the design is local-first); turn on for hardware that can't
     # serve the local SLM, so each request doesn't eat a guaranteed local

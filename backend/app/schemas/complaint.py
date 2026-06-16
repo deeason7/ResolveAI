@@ -160,3 +160,16 @@ class BulkImportResponse(BaseModel):
     rows_skipped: int
     batches: int
     elapsed_seconds: float
+
+
+class ComplaintFacets(BaseModel):
+    """Distinct filter values for the triage/list dropdowns.
+
+    Exact-match filters are unusable when you can't recall the precise string
+    ("EQUIFAX, INC." vs "Equifax"), so the frontend turns these into selectable
+    lists instead of free text. Both are static between reseeds — the frontend
+    caches the response.
+    """
+
+    products: list[str]
+    companies: list[str]

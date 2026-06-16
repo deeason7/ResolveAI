@@ -35,6 +35,20 @@ _DEMO_KEY = "demo_mode"
 DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "demo@resolveai-demo.com")
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo-resolveai-2026")
 
+# Read-through caching for global, read-only aggregates. These endpoints return
+# the same payload for every authenticated user — cost/latency/routing rollups,
+# graph neighborhoods, sentiment/product/company aggregates over a fixed corpus,
+# nearest-neighbour search in a static index. Because the answer doesn't depend
+# on *who* asks, one short-lived cache is shared safely across reruns, pages, and
+# even users on the same server. Live, per-pipeline reads (board, triage, a single
+# complaint/resolution) are deliberately left uncached below — they must reflect
+# the most recent write, and caching keyed on the request args (which is all
+# st.cache_data sees) can't observe a status flip the worker just made.
+#
+# Two tiers, by how fast the underlying data actually moves:
+CACHE_TTL_MONITORING_S = 300  # 5 min — LLMOps; llm_logs grows on every model call
+CACHE_TTL_REFERENCE_S = 900  # 15 min — corpus/graph aggregates, static between reseeds
+
 
 class ApiError(Exception):
     """Backend call failed. status_code 0 means the API was unreachable."""
@@ -56,11 +70,48 @@ def _http() -> httpx.Client:
     return st.session_state[_CLIENT_KEY]
 
 
+def _humanize_validation(errors: list[Any]) -> str:
+    """Translate FastAPI's 422 validation list into plain language.
+
+    The raw payload — e.g. ``[{'type': 'value_error', 'loc': ['body', 'email'],
+    'msg': 'value is not a valid email address: ...'}]`` — is for developers;
+    users get one readable sentence per offending field instead of dict syntax.
+    """
+    parts: list[str] = []
+    for err in errors:
+        if not isinstance(err, dict):
+            parts.append(str(err))
+            continue
+        loc = err.get("loc") or []
+        # loc is like ["body", "email"]; the last hop is the field name.
+        field = str(loc[-1]) if loc else ""
+        if field == "email":
+            parts.append("Please enter a valid email address.")
+            continue
+        label = field.replace("_", " ").capitalize() if field else "Input"
+        # Pydantic v2 prefixes custom-validator messages with "Value error, ".
+        msg = str(err.get("msg", "is invalid"))
+        if msg.startswith("Value error, "):
+            msg = msg[len("Value error, ") :]
+        parts.append(f"{label}: {msg}")
+    return " ".join(parts) if parts else "Please check your input and try again."
+
+
 def _detail(resp: httpx.Response) -> str:
+    """Best human-readable explanation for a failed response.
+
+    FastAPI returns a plain-string ``detail`` for HTTPExceptions (already
+    user-facing) but a structured *list* for 422 validation errors — the latter
+    is run through ``_humanize_validation`` instead of being str()'d into a wall
+    of dict syntax.
+    """
     try:
-        return str(resp.json().get("detail", resp.text))
+        detail = resp.json().get("detail", resp.text)
     except ValueError:
         return resp.text or f"HTTP {resp.status_code}"
+    if isinstance(detail, list):
+        return _humanize_validation(detail)
+    return str(detail)
 
 
 def _try_refresh() -> bool:
@@ -109,7 +160,9 @@ def current_user() -> dict | None:
 
 
 def clear_session() -> None:
-    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY):
+    # "tour_step" belongs to tour.py — popped here so a demo logout fully
+    # resets the guided tour (importing tour would be circular).
+    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step"):
         st.session_state.pop(key, None)
 
 
@@ -130,6 +183,7 @@ def start_demo() -> None:
         if exc.status_code != 401:
             raise
         register(DEMO_EMAIL, "Demo Viewer", DEMO_PASSWORD)
+        login(DEMO_EMAIL, DEMO_PASSWORD)
     st.session_state[_DEMO_KEY] = True
 
 
@@ -142,14 +196,13 @@ def login(email: str, password: str) -> None:
 
 
 def register(email: str, full_name: str, password: str) -> None:
+    """Create an account. Does NOT sign in — the user logs in explicitly afterward."""
     resp = _http().post(
         "/auth/register",
         json={"email": email, "full_name": full_name, "password": password},
     )
     if resp.status_code != 201:
         raise ApiError(resp.status_code, _detail(resp))
-    st.session_state[_TOKEN_KEY] = resp.json()["access_token"]
-    st.session_state[_USER_KEY] = me()
 
 
 def logout() -> None:
@@ -177,6 +230,13 @@ def triage_queue(**filters: Any) -> dict:
     return _request("GET", "/complaints/queue", params=params).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
+def facets() -> dict:
+    """Distinct products + companies for the filter dropdowns — global and static
+    between reseeds, so it's cached like the other reference aggregates."""
+    return _request("GET", "/complaints/facets").json()
+
+
 def get_complaint(complaint_id: str) -> dict:
     return _request("GET", f"/complaints/{complaint_id}").json()
 
@@ -185,6 +245,7 @@ def submit_complaint(payload: dict) -> dict:
     return _request("POST", "/complaints/", json=payload).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def similar_complaints(complaint_id: str, limit: int = 5, product: str | None = None) -> dict:
     params: dict[str, Any] = {"limit": limit}
     if product:
@@ -195,12 +256,14 @@ def similar_complaints(complaint_id: str, limit: int = 5, product: str | None = 
 # ── knowledge graph ───────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def company_profile(name: str) -> dict:
     # quote(safe="") because company names contain commas, ampersands and the
     # odd slash — an unescaped "/" would split the path and 404.
     return _request("GET", f"/graph/company/{quote(name, safe='')}").json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
 def graph_explore(node_id: str, depth: int = 2) -> dict:
     return _request("GET", "/graph/explore", params={"node_id": node_id, "depth": depth}).json()
 
@@ -208,22 +271,27 @@ def graph_explore(node_id: str, depth: int = 2) -> dict:
 # ── llmops ────────────────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_costs(days: int = 90) -> dict:
     return _request("GET", "/llmops/costs", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_latency(days: int = 90) -> dict:
     return _request("GET", "/llmops/latency", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_routing(days: int = 90) -> dict:
     return _request("GET", "/llmops/routing", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_drift(days: int = 90) -> dict:
     return _request("GET", "/llmops/drift", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_MONITORING_S, show_spinner=False)
 def llmops_guardrails(layer: str | None = None, limit: int = 100) -> dict:
     params: dict[str, Any] = {"limit": limit}
     if layer:
@@ -234,14 +302,17 @@ def llmops_guardrails(layer: str | None = None, limit: int = 100) -> dict:
 # ── analytics ─────────────────────────────────────────────────────────────────
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def sentiment_trends(days: int = 30) -> dict:
     return _request("GET", "/analytics/sentiment/trends", params={"days": days}).json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def products_breakdown() -> dict:
     return _request("GET", "/analytics/products/breakdown").json()
 
 
+@st.cache_data(ttl=CACHE_TTL_REFERENCE_S, show_spinner=False)
 def companies_risk(limit: int = 10) -> dict:
     return _request("GET", "/analytics/companies/risk", params={"limit": limit}).json()
 
@@ -269,3 +340,18 @@ def reject_resolution(complaint_id: str, feedback: str) -> dict:
     return _request(
         "POST", f"/resolutions/{complaint_id}/reject", json={"feedback": feedback}
     ).json()
+
+
+# ── workspace ─────────────────────────────────────────────────────────────────
+
+
+def workspace_board() -> dict:
+    return _request("GET", "/workspace/board").json()
+
+
+def enqueue_classification(limit: int = 50) -> dict:
+    return _request("POST", "/workspace/enqueue/classification", params={"limit": limit}).json()
+
+
+def enqueue_resolution_batch(limit: int = 50) -> dict:
+    return _request("POST", "/workspace/enqueue/resolution", params={"limit": limit}).json()

@@ -89,7 +89,7 @@ async def register(
 
     await _audit(session, request, user.id, "register")
 
-    access = create_access_token(str(user.id), user.role)
+    access = create_access_token(str(user.id), user.role.value)
     refresh = create_refresh_token(str(user.id))
     _set_refresh_cookie(response, refresh)
 
@@ -119,7 +119,7 @@ async def login(
 
     await _audit(session, request, user.id, "login")
 
-    access = create_access_token(str(user.id), user.role)
+    access = create_access_token(str(user.id), user.role.value)
     refresh = create_refresh_token(str(user.id))
     _set_refresh_cookie(response, refresh)
 

@@ -12,19 +12,29 @@ from types import SimpleNamespace
 
 import httpx
 import pytest
+from openai import RateLimitError
 from pydantic import BaseModel
 
 from app.services.llm_client import (
+    _MAX_BACKOFF_S,
     LLMClient,
     LLMResponse,
     LLMUnavailableError,
     Provider,
+    _retry_after_seconds,
     get_llm_client,
     reset_llm_client,
 )
 
 
-def _settings(groq_key: str = "", skip_local: bool = False) -> SimpleNamespace:
+def _settings(
+    groq_key: str = "",
+    skip_local: bool = False,
+    rate_limit_retries: int = 2,
+    rate_limit_backoff_s: float = 0.0,
+) -> SimpleNamespace:
+    # rate_limit_backoff_s defaults to 0.0 so tests that hit the no-header path
+    # don't actually sleep.
     return SimpleNamespace(
         llm_timeout_s=5.0,
         classification_max_retries=1,
@@ -34,7 +44,39 @@ def _settings(groq_key: str = "", skip_local: bool = False) -> SimpleNamespace:
         groq_base_url="https://api.groq.com/openai/v1",
         groq_model="llama-3.3-70b-versatile",
         llm_skip_local=skip_local,
+        llm_rate_limit_retries=rate_limit_retries,
+        llm_rate_limit_backoff_s=rate_limit_backoff_s,
     )
+
+
+def _rate_limit_error(retry_after: str | None = "0") -> RateLimitError:
+    """Build a real openai.RateLimitError carrying a chosen Retry-After header."""
+    headers = {} if retry_after is None else {"retry-after": retry_after}
+    response = httpx.Response(
+        429, headers=headers, request=httpx.Request("POST", "https://api.groq.com")
+    )
+    return RateLimitError("rate limited", response=response, body=None)
+
+
+class _FlakyCompletions:
+    """Raise ``exc`` for the first ``fail_times`` calls, then return ``result``."""
+
+    def __init__(self, exc, result, fail_times):
+        self._exc = exc
+        self._result = result
+        self._fail_times = fail_times
+        self.calls: list[dict] = []
+
+    def create_with_completion(self, **kwargs):
+        self.calls.append(kwargs)
+        if len(self.calls) <= self._fail_times:
+            raise self._exc
+        return self._result
+
+
+class _FlakyClient:
+    def __init__(self, exc, result, fail_times):
+        self.chat = SimpleNamespace(completions=_FlakyCompletions(exc, result, fail_times))
 
 
 class _Dummy(BaseModel):
@@ -142,6 +184,76 @@ class TestStructured:
         c = _client_with(ollama=fake, groq_key="")
         c.structured(_Dummy, [{"role": "user", "content": "hi"}], temperature=0.1)
         assert fake.chat.completions.calls[0]["temperature"] == 0.1
+
+
+class TestRateLimitBackoff:
+    def test_retries_same_provider_then_succeeds(self):
+        # Two 429s then a success: the client stays on the SAME provider and
+        # returns the eventual good result rather than fail-closing.
+        flaky = _FlakyClient(
+            exc=_rate_limit_error("0"),
+            result=(_Dummy(x=7), _completion(3, 1)),
+            fail_times=2,
+        )
+        c = _client_with(ollama=flaky, groq_key="")
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.data.x == 7
+        assert resp.provider == Provider.OLLAMA
+        assert resp.is_fallback is False
+        # 2 rate-limited attempts + 1 success, all on the one provider.
+        assert len(flaky.chat.completions.calls) == 3
+
+    def test_honors_retry_after_header_duration(self, monkeypatch):
+        slept: list[float] = []
+        monkeypatch.setattr("app.services.llm_client.time.sleep", lambda s: slept.append(s))
+        flaky = _FlakyClient(
+            exc=_rate_limit_error("2.5"),
+            result=(_Dummy(x=1), _completion()),
+            fail_times=1,
+        )
+        c = _client_with(ollama=flaky, groq_key="")
+        c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert slept == [2.5]
+
+    def test_exhausting_budget_falls_back_to_next_provider(self):
+        # Primary 429s past its budget (1 retry → 2 attempts), so the chain
+        # walks on to Groq instead of looping forever.
+        always = _FakeClient(exc=_rate_limit_error("0"))
+        good = _FakeClient(result=(_Dummy(x=9), _completion(4, 2)))
+        c = LLMClient(settings=_settings(groq_key="gk", rate_limit_retries=1))
+        c._clients[Provider.OLLAMA] = always
+        c._clients[Provider.GROQ] = good
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.provider == Provider.GROQ
+        assert resp.is_fallback is True
+        assert len(always.chat.completions.calls) == 2  # 1 initial + 1 retry
+
+    def test_exhausting_budget_on_only_provider_raises(self):
+        always = _FakeClient(exc=_rate_limit_error("0"))
+        c = LLMClient(settings=_settings(groq_key="", rate_limit_retries=1))
+        c._clients[Provider.OLLAMA] = always
+        with pytest.raises(LLMUnavailableError):
+            c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert len(always.chat.completions.calls) == 2
+
+
+class TestRetryAfter:
+    def test_honors_header_value(self):
+        assert _retry_after_seconds(_rate_limit_error("3"), default=10.0) == 3.0
+
+    def test_missing_header_uses_default(self):
+        assert _retry_after_seconds(_rate_limit_error(None), default=10.0) == 10.0
+
+    def test_unparseable_header_uses_default(self):
+        # The HTTP-date form is valid HTTP but we don't decode it -> default.
+        err = _rate_limit_error("Wed, 21 Oct 2025 07:28:00 GMT")
+        assert _retry_after_seconds(err, default=7.0) == 7.0
+
+    def test_caps_at_max_backoff(self):
+        assert _retry_after_seconds(_rate_limit_error("99999"), default=10.0) == _MAX_BACKOFF_S
+
+    def test_negative_clamped_to_zero(self):
+        assert _retry_after_seconds(_rate_limit_error("-5"), default=10.0) == 0.0
 
 
 class TestSingleton:

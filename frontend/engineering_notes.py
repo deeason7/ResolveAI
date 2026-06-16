@@ -4,20 +4,20 @@ Per-page "under the hood" notes for the sidebar.
 The pages demo the product; this panel demos the engineering. Each page
 gets the architectural decisions behind it — what was chosen, what it beat,
 and why — so a visitor or an interviewer sees the reasoning, not just the
-pixels. Auto-expanded in demo sessions, tucked away for daily work.
+pixels. Collapsed by default everywhere: business value leads, and the
+tour's final step points the curious here.
 """
 
 from __future__ import annotations
 
 import streamlit as st
 
-import api_client
-
 _STACK_FOOTER = (
     "Auth: short-lived JWT + httpOnly rotating refresh cookie, silent re-auth "
-    "on 401; every page talks through one API-client seam. Stack: FastAPI · "
-    "PostgreSQL · Redis Streams · Qdrant · Neo4j · fine-tuned SLM + cloud LLM "
-    "fallback · Streamlit — fully Dockerized."
+    "on 401; every page talks through one API-client seam that memoizes read-only "
+    "aggregates (cost/latency, graph, trends) behind a short TTL while live pipeline "
+    "views stay uncached. Stack: FastAPI · PostgreSQL · Redis Streams · Qdrant · "
+    "Neo4j · fine-tuned SLM + cloud LLM fallback · Streamlit — fully Dockerized."
 )
 
 _NOTES = {
@@ -147,6 +147,24 @@ monitoring actually cares about.
 guardrail catches; the resolutions table is one row per draft version, so
 flattening its JSON violations in Python stays cheap by construction.
 """,
+    "Workspace": """
+**Durable truth, transient overlay.** Stage counts read `complaint.status` —
+the signal the workers write in the *same transaction* as the work — so the
+board is always exact. Redis stream state (waiting / in-flight / workers) is
+layered on top, best-effort: the moving picture over the settled one.
+
+**One producer, many callers.** Enqueueing reuses the exact XADD functions the
+submit and per-complaint generate routes already use — a single definition of
+each stream's message shape, never a second copy.
+
+**At-least-once by design.** A complaint stays `pending` until a worker
+classifies it, so re-enqueuing an unprocessed one just re-runs it, never
+corrupts it. The resolution batch flips escalated -> agent_triggered first, so
+a re-run can't double-draft the same case.
+
+**Bounded blast radius.** One enqueue is capped at 500 — a single click can't
+flood the stream with the whole 200K backlog.
+""",
 }
 
 
@@ -155,6 +173,6 @@ def render(page_title: str) -> None:
     notes = _NOTES.get(page_title)
     if not notes:
         return
-    with st.expander("🛠️ Under the hood", expanded=api_client.is_demo()):
+    with st.expander("🛠️ Under the hood", expanded=False):
         st.markdown(notes)
         st.caption(_STACK_FOOTER)

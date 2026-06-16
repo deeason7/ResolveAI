@@ -45,6 +45,7 @@ from app.services.graph_store import GraphStore, get_default_graph_store
 from app.services.llmops_tracker import LLMOpsTracker
 from app.services.vector_store import VectorStore, get_default_store
 from app.workers.resolution_worker import enqueue_resolution
+from app.workers.stream_utils import reclaim_stale_messages
 
 logger = logging.getLogger(__name__)
 
@@ -150,6 +151,16 @@ class ClassificationWorker:
             self.consumer,
         )
         while not self._stop.is_set():
+            # First rescue anything a dead/slow consumer left stranded in the
+            # PEL — XREADGROUP '>' below would never redeliver those on its own.
+            await reclaim_stale_messages(
+                self.redis,
+                stream=self.stream,
+                group=self.group,
+                consumer=self.consumer,
+                handle=self._handle,
+                min_idle_ms=self.settings.reclaim_min_idle_ms,
+            )
             resp = await self.redis.xreadgroup(
                 groupname=self.group,
                 consumername=self.consumer,
