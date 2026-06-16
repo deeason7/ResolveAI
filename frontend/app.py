@@ -4,9 +4,13 @@ App shell: auth gate + top navigation.
 st.navigation must be called on EVERY script run, authenticated or not. A run
 that skips it (the old st.stop()-before-navigation gate) makes Streamlit fall
 back to the legacy pages/-directory auto-discovery, which happily renders a
-sidebar of every page to anonymous visitors. So the gate doesn't skip
-navigation — it swaps the page list: logged-out sessions get a login-only list
-(rendered with no chrome), logged-in sessions get the real pages.
+sidebar of every page to anonymous visitors. So we always declare the real
+pages — which also means a refreshed deep link like /workspace still resolves
+instead of hitting Streamlit's "page not found" fallback. Access is gated
+*after* navigation: a logged-out run renders the login screen and stops before
+any page body executes, and the top nav is only drawn when authenticated, so
+nothing leaks to anonymous visitors. (Sign in on a deep link and you land back
+on that page.)
 
 Navigation is a custom TOP bar, not the sidebar. Streamlit 1.41 has no native
 position="top", so we pass position="hidden" to suppress the built-in sidebar
@@ -78,21 +82,24 @@ def _top_nav() -> None:
             _account_popover()
 
 
-if api_client.is_authenticated():
-    pages = [
-        st.Page(path, title=title, icon=icon, default=(i == 0))
-        for i, (path, title, _label, icon) in enumerate(_NAV)
-    ]
-else:
-    pages = [st.Page(auth.render_login_page, title="Sign in", icon="🔒")]
-
+# Declare the real pages on EVERY run — logged out too — so a refreshed deep
+# link like /workspace resolves instead of falling through to "page not found".
+pages = [
+    st.Page(path, title=title, icon=icon, default=(i == 0))
+    for i, (path, title, _label, icon) in enumerate(_NAV)
+]
 # position="hidden": suppress the built-in sidebar nav; we draw our own on top.
 nav = st.navigation(pages, position="hidden")
 
-if api_client.is_authenticated():
-    _top_nav()
-    # The one remaining sidebar element: the page's engineering notes, collapsed.
-    with st.sidebar:
-        engineering_notes.render(nav.title)
+if not api_client.is_authenticated():
+    # Gate AFTER navigation (not by swapping the page list): render login and
+    # stop before any page body runs. The top nav isn't drawn, so an anonymous
+    # visitor sees only the login screen even though the pages are declared.
+    auth.render_login_page()
+    st.stop()
 
+_top_nav()
+# The one remaining sidebar element: the page's engineering notes, collapsed.
+with st.sidebar:
+    engineering_notes.render(nav.title)
 nav.run()
