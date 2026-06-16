@@ -32,8 +32,8 @@ dependencies = [
     # Redis
     "redis[hiredis]>=5.0,<6.0",
 
-    # Vector store
-    "qdrant-client>=1.9,<2.0",
+    # Vector store — floor at the query_points API era, matched to the 1.13.x server
+    "qdrant-client>=1.13,<2.0",
 
     # Embeddings
     "sentence-transformers>=3.0,<4.0",
