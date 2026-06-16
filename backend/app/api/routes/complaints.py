@@ -9,8 +9,9 @@ Complaint endpoints:
   POST   /complaints/bulk-import  — admin-only CSV ingest (server-side path)
 
 Listed and detail routes are authenticated (the dataset contains consumer
-PII — even read access needs an account). Bulk-import is admin-gated so a
-viewer/analyst can't trigger a 200K-row insert.
+PII — even read access needs an account). Submitting needs a writer role
+(analyst or admin) — a viewer is read-only. Bulk-import is admin-gated so even
+an analyst can't trigger a 200K-row insert.
 """
 
 from __future__ import annotations
@@ -26,7 +27,7 @@ from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.deps import get_current_user, get_redis, require_admin
+from app.core.deps import get_current_user, get_redis, require_admin, require_writer
 from app.database import get_session
 from app.models.complaint import Complaint, ComplaintStatus
 from app.models.user import User
@@ -238,7 +239,7 @@ async def submit_complaint(
     body: ComplaintCreate,
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_writer),
 ) -> ComplaintPublic:
     """Submit a new complaint and queue it for classification.
 

@@ -25,7 +25,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.core.deps import get_current_user, get_redis
+from app.core.deps import get_current_user, get_redis, require_writer
 from app.database import get_session
 from app.middleware.rate_limit import limiter
 from app.models.complaint import Complaint, ComplaintStatus
@@ -109,7 +109,7 @@ async def enqueue_classification(
     limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_writer),
 ) -> EnqueueResult:
     """Push up to `limit` still-pending complaints onto the classification stream.
 
@@ -136,7 +136,7 @@ async def enqueue_resolution_batch(
     limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_writer),
 ) -> EnqueueResult:
     """Push up to `limit` escalated complaints to the resolution agent.
 

@@ -15,6 +15,8 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from app.models.user import UserRole
+
 REGISTER_URL = "/api/v1/auth/register"
 LOGIN_URL = "/api/v1/auth/login"
 COMPLAINTS_URL = "/api/v1/complaints/"
@@ -28,6 +30,11 @@ VALID_USER = {
 ADMIN_USER = {
     "email": "admin@test.com",
     "full_name": "Test Admin",
+    "password": "securepassword123",
+}
+VIEWER_USER = {
+    "email": "viewer@test.com",
+    "full_name": "Test Viewer",
     "password": "securepassword123",
 }
 
@@ -50,17 +57,17 @@ async def _register_and_token(client: AsyncClient, user: dict) -> str:
     return r.json()["access_token"]
 
 
-async def _promote_to_admin(email: str) -> None:
-    """Direct DB write to flip a user's role to admin."""
+async def _set_role(email: str, role: UserRole) -> None:
+    """Direct DB write to set a user's role — register only ever mints analysts."""
     from app.database import engine
-    from app.models.user import User, UserRole
+    from app.models.user import User
 
     factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
         result = await s.exec(select(User).where(User.email == email))
         user = result.first()
         assert user is not None
-        user.role = UserRole.admin
+        user.role = role
         s.add(user)
         await s.commit()
 
@@ -73,7 +80,14 @@ async def analyst_token(client: AsyncClient) -> str:
 @pytest_asyncio.fixture()
 async def admin_token(client: AsyncClient) -> str:
     token = await _register_and_token(client, ADMIN_USER)
-    await _promote_to_admin(ADMIN_USER["email"])
+    await _set_role(ADMIN_USER["email"], UserRole.admin)
+    return token
+
+
+@pytest_asyncio.fixture()
+async def viewer_token(client: AsyncClient) -> str:
+    token = await _register_and_token(client, VIEWER_USER)
+    await _set_role(VIEWER_USER["email"], UserRole.viewer)
     return token
 
 
@@ -643,3 +657,22 @@ class TestSimilarComplaints:
 
         r = await client.get(f"{COMPLAINTS_URL}{_uuid.uuid4()}/similar")
         assert r.status_code == 401
+
+
+# ── writer gate (viewer is read-only) ───────────────────────────────────────────
+
+
+class TestWriterGate:
+    async def test_viewer_cannot_submit(self, client: AsyncClient, viewer_token: str):
+        r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(viewer_token))
+        assert r.status_code == 403
+
+    async def test_viewer_can_still_read(self, client: AsyncClient, viewer_token: str):
+        # read-only means reads still work — the gate is on writes, not the account
+        r = await client.get(COMPLAINTS_URL, headers=_auth(viewer_token))
+        assert r.status_code == 200
+
+    async def test_analyst_can_submit(self, client: AsyncClient, analyst_token: str):
+        # the default writer role is unaffected — the gate is selective, not blanket
+        r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(analyst_token))
+        assert r.status_code == 201
