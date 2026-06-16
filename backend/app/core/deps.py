@@ -71,6 +71,27 @@ def require_admin(current_user: User = Depends(get_current_user)) -> User:
     return current_user
 
 
+# Roles allowed to change state. An allow-list (not "role != viewer") is the
+# point: a role we add later is read-only until it's explicitly granted write —
+# authz should fail closed, not open.
+_WRITER_ROLES = frozenset({UserRole.admin, UserRole.analyst})
+
+
+def require_writer(current_user: User = Depends(get_current_user)) -> User:
+    """Gate a route to roles that may mutate state (analyst, admin).
+
+    A viewer authenticates normally and can read every page, but can't submit,
+    enqueue, generate, approve, or reject. Mounts on get_current_user and returns
+    the same User, so it's a drop-in for it at any write call site.
+    """
+    if current_user.role not in _WRITER_ROLES:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="This action requires a writer role (analyst or admin)",
+        )
+    return current_user
+
+
 def get_graph_store() -> GraphStore:
     """Inject the process-wide Neo4j graph store.
 

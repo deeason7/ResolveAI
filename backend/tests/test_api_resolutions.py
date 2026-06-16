@@ -25,6 +25,7 @@ from app.config import settings
 from app.models.audit_log import AuditLog
 from app.models.complaint import Complaint, ComplaintStatus
 from app.models.resolution import GuardrailStatus, Resolution
+from app.models.user import UserRole
 
 GENERATE_URL = "/api/v1/resolutions/{id}/generate"
 LATEST_URL = "/api/v1/resolutions/{id}"
@@ -32,7 +33,8 @@ REVISIONS_URL = "/api/v1/resolutions/{id}/revisions"
 APPROVE_URL = "/api/v1/resolutions/{id}/approve"
 REJECT_URL = "/api/v1/resolutions/{id}/reject"
 
-_DUMMY_USER = SimpleNamespace(id=uuid.uuid4(), email="analyst@test.com")
+_DUMMY_USER = SimpleNamespace(id=uuid.uuid4(), email="analyst@test.com", role=UserRole.analyst)
+_VIEWER_USER = SimpleNamespace(id=uuid.uuid4(), email="viewer@test.com", role=UserRole.viewer)
 
 
 @pytest_asyncio.fixture()
@@ -51,7 +53,7 @@ def fake_redis():
     return fakeredis.aioredis.FakeRedis(decode_responses=True)
 
 
-def _build_app(factory, fake_redis, *, bypass_auth=True):
+def _build_app(factory, fake_redis, *, bypass_auth=True, user=_DUMMY_USER):
     from app.core.deps import get_current_user, get_redis
     from app.database import get_session
     from app.main import create_app
@@ -69,7 +71,7 @@ def _build_app(factory, fake_redis, *, bypass_auth=True):
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_redis] = lambda: fake_redis
     if bypass_auth:
-        app.dependency_overrides[get_current_user] = lambda: _DUMMY_USER
+        app.dependency_overrides[get_current_user] = lambda: user
     return app
 
 
@@ -294,6 +296,42 @@ class TestAuthGate:
         async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as ac:
             r = await ac.get(LATEST_URL.format(id=uuid.uuid4()))
         assert r.status_code == 401
+
+
+class TestWriterGate:
+    """A viewer can read drafts but can't generate, approve, or reject."""
+
+    def _viewer_client(self, factory, fake_redis):
+        app = _build_app(factory, fake_redis, user=_VIEWER_USER)
+        return AsyncClient(transport=ASGITransport(app=app), base_url="http://test")
+
+    async def test_viewer_cannot_generate(self, factory, fake_redis):
+        cid = await _seed_complaint(factory, status=ComplaintStatus.classified)
+        async with self._viewer_client(factory, fake_redis) as ac:
+            r = await ac.post(GENERATE_URL.format(id=cid))
+        assert r.status_code == 403
+
+    async def test_viewer_cannot_approve(self, factory, fake_redis):
+        # the draft is passed + approvable, so 403 proves the gate fires before the body
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        await _seed_resolution(factory, cid)
+        async with self._viewer_client(factory, fake_redis) as ac:
+            r = await ac.post(APPROVE_URL.format(id=cid))
+        assert r.status_code == 403
+
+    async def test_viewer_cannot_reject(self, factory, fake_redis):
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        await _seed_resolution(factory, cid)
+        async with self._viewer_client(factory, fake_redis) as ac:
+            r = await ac.post(REJECT_URL.format(id=cid), json={"feedback": "needs more empathy"})
+        assert r.status_code == 403
+
+    async def test_viewer_can_still_read_latest(self, factory, fake_redis):
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        await _seed_resolution(factory, cid)
+        async with self._viewer_client(factory, fake_redis) as ac:
+            r = await ac.get(LATEST_URL.format(id=cid))
+        assert r.status_code == 200
 
 
 class TestVersionUniqueness:

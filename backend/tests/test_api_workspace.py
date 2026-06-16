@@ -21,12 +21,14 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
 from app.models.complaint import Complaint, ComplaintStatus
+from app.models.user import UserRole
 
 BOARD_URL = "/api/v1/workspace/board"
 CLASSIFY_URL = "/api/v1/workspace/enqueue/classification"
 RESOLVE_URL = "/api/v1/workspace/enqueue/resolution"
 
-_DUMMY_USER = SimpleNamespace(id=uuid.uuid4(), email="analyst@test.com")
+_DUMMY_USER = SimpleNamespace(id=uuid.uuid4(), email="analyst@test.com", role=UserRole.analyst)
+_VIEWER_USER = SimpleNamespace(id=uuid.uuid4(), email="viewer@test.com", role=UserRole.viewer)
 
 
 @pytest_asyncio.fixture()
@@ -45,7 +47,7 @@ def fake_redis():
     return fakeredis.aioredis.FakeRedis(decode_responses=True)
 
 
-def _build_app(factory, fake_redis, *, bypass_auth=True):
+def _build_app(factory, fake_redis, *, bypass_auth=True, user=_DUMMY_USER):
     from app.core.deps import get_current_user, get_redis
     from app.database import get_session
     from app.main import create_app
@@ -63,7 +65,7 @@ def _build_app(factory, fake_redis, *, bypass_auth=True):
     app.dependency_overrides[get_session] = override_session
     app.dependency_overrides[get_redis] = lambda: fake_redis
     if bypass_auth:
-        app.dependency_overrides[get_current_user] = lambda: _DUMMY_USER
+        app.dependency_overrides[get_current_user] = lambda: user
     return app
 
 
@@ -229,3 +231,37 @@ async def test_enqueue_resolution_rolls_back_flips_when_xadd_fails(
     assert statuses.count(ComplaintStatus.escalated.value) == 3
     assert statuses.count(ComplaintStatus.agent_triggered.value) == 0
     assert await fake_redis.xlen(settings.resolution_queue) == 0
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_enqueue_classification(factory, fake_redis):
+    await _seed(factory, pending=3)
+    app = _build_app(factory, fake_redis, user=_VIEWER_USER)
+    async with _client(app) as ac:
+        r = await ac.post(CLASSIFY_URL, params={"limit": 5})
+    assert r.status_code == 403
+    assert await fake_redis.xlen(settings.classification_queue) == 0  # gate blocks the side effect
+
+
+@pytest.mark.asyncio
+async def test_viewer_cannot_enqueue_resolution(factory, fake_redis):
+    await _seed(factory, escalated=2)
+    app = _build_app(factory, fake_redis, user=_VIEWER_USER)
+    async with _client(app) as ac:
+        r = await ac.post(RESOLVE_URL, params={"limit": 5})
+    assert r.status_code == 403
+    # 403 fires before the body, so no escalated row got flipped to agent_triggered
+    async with factory() as s:
+        statuses = [v.value for v in (await s.exec(select(Complaint.status))).all()]
+    assert statuses.count(ComplaintStatus.escalated.value) == 2
+    assert statuses.count(ComplaintStatus.agent_triggered.value) == 0
+
+
+@pytest.mark.asyncio
+async def test_viewer_can_still_read_board(factory, fake_redis):
+    await _seed(factory, pending=2)
+    app = _build_app(factory, fake_redis, user=_VIEWER_USER)
+    async with _client(app) as ac:
+        r = await ac.get(BOARD_URL)
+    assert r.status_code == 200
+    assert r.json()["pending"] == 2

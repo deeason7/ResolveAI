@@ -25,7 +25,7 @@ from fastapi import APIRouter, Depends, HTTPException, status
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.deps import get_current_user, get_redis
+from app.core.deps import get_current_user, get_redis, require_writer
 from app.database import get_session
 from app.models.audit_log import AuditLog
 from app.models.complaint import Complaint, ComplaintStatus
@@ -78,7 +78,7 @@ async def generate_resolution(
     complaint_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_writer),
 ) -> ResolutionQueued:
     """Manually trigger the resolution agent for a complaint.
 
@@ -158,7 +158,7 @@ async def list_revisions(
 async def approve_resolution(
     complaint_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_writer),
 ) -> ReviewOutcome:
     """Sign off on the latest draft; the complaint is resolved.
 
@@ -222,7 +222,7 @@ async def reject_resolution(
     body: RejectRequest,
     session: AsyncSession = Depends(get_session),
     redis: aioredis.Redis = Depends(get_redis),
-    current_user: User = Depends(get_current_user),
+    current_user: User = Depends(require_writer),
 ) -> ResolutionQueued:
     """Reject the latest draft; the feedback drives a regeneration.
 
