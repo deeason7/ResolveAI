@@ -35,6 +35,10 @@ class Settings(BaseSettings):
     # Qdrant
     qdrant_host: str = "qdrant"
     qdrant_port: int = 6333
+    # Managed Qdrant Cloud: set qdrant_url (e.g. https://xxxx.cloud.qdrant.io:6333)
+    # + qdrant_api_key to use a hosted cluster. Empty url keeps the host/port path.
+    qdrant_url: str = ""
+    qdrant_api_key: str = ""
 
     # Neo4j
     neo4j_uri: str
