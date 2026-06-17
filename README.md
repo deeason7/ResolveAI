@@ -180,8 +180,8 @@ docker compose -f docker-compose.prod.yml up -d --build
 ./scripts/seed_all.sh                        # migrations + corpus + graph
 ```
 
-The full runbook — an Oracle Cloud Always Free (ARM) walkthrough, a
-DigitalOcean fallback, DNS/TLS, backups and troubleshooting — is in
+The full runbook — a DigitalOcean walkthrough (any Ubuntu VM works),
+DNS/TLS, backups and troubleshooting — is in
 [`docs/deployment.md`](docs/deployment.md).
 
 ## Development
