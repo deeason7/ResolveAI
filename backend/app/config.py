@@ -20,6 +20,9 @@ class Settings(BaseSettings):
 
     # PostgreSQL
     database_url: str
+    # Managed Postgres (e.g. Neon) requires TLS; asyncpg ignores sslmode= in the
+    # URL, so this flag adds connect_args={"ssl": True} on the engine instead.
+    db_require_ssl: bool = False
 
     # Redis
     redis_url: str
