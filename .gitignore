@@ -86,6 +86,8 @@ fine_tuning/results/
 
 # Secrets
 .env
+.env.production
+.env.local
 *.pem
 *.key
 secrets/
