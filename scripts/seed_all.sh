@@ -14,6 +14,9 @@
 #   ./scripts/seed_all.sh
 #
 # Knobs (environment variables):
+#   SEED_ROWS=N               sample N complaints (default 200000). Set ~30000 for
+#                             free-tier DBs (Neon 0.5 GB / Qdrant Cloud 1 GB). An
+#                             existing CSV is reused as-is, so to RESIZE, delete it.
 #   SKIP_DOWNLOAD=1            reuse an existing CSV instead of re-fetching ~1.8 GB
 #   TOP_COMPANIES=N            companies to load into the graph (default 500)
 #   RESET_GRAPH=1             wipe the graph before seeding
@@ -22,8 +25,9 @@
 set -euo pipefail
 
 COMPOSE="docker compose -f ${COMPOSE_FILE:-docker-compose.prod.yml}"
-CSV="/fine_tuning/data/raw/cfpb_200k.csv"
+CSV="/fine_tuning/data/raw/cfpb_200k.csv"   # staging filename; holds SEED_ROWS rows
 TOP_COMPANIES="${TOP_COMPANIES:-500}"
+SEED_ROWS="${SEED_ROWS:-200000}"
 
 log() { printf '\n\033[1;36m== %s ==\033[0m\n' "$*"; }
 
@@ -46,6 +50,7 @@ elif $COMPOSE exec -T api test -f "$CSV"; then
 else
 	$COMPOSE exec -T api python /scripts/download_cfpb_data.py \
 		--output "$CSV" \
+		--limit "$SEED_ROWS" \
 		--workdir /fine_tuning/data/raw/_cfpb_workdir
 fi
 
@@ -61,7 +66,7 @@ print(f"ingest: read={r.rows_read} inserted={r.rows_inserted} "
       f"skipped={r.rows_skipped} in {r.elapsed_seconds:.1f}s")
 PY
 
-log "4/5  Embed narratives into Qdrant (the long pole — ~90 min on CPU for 200K)"
+log "4/5  Embed narratives into Qdrant (the long pole — scales with SEED_ROWS; ~90 min for 200K on CPU)"
 $COMPOSE exec -T api python /scripts/populate_vector_db.py
 
 log "5/5  Seed the Neo4j knowledge graph (top ${TOP_COMPANIES} companies)"
