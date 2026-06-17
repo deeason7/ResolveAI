@@ -30,82 +30,58 @@ internet ──────────────────▶  Caddy  ─�
   `resolution-worker`) with `restart: unless-stopped`, instead of being started
   by hand like in dev.
 - **Ollama is opt-in.** By default we classify through Groq's free tier
-  (`LLM_SKIP_LOCAL=true`), which is what an ARM or low-RAM host wants. A bigger
-  box can run the local 3B with `--profile local-llm` (and `LLM_SKIP_LOCAL=false`).
+  (`LLM_SKIP_LOCAL=true`), which is what a low-RAM host wants. A bigger box can
+  run the local 3B with `--profile local-llm` (and `LLM_SKIP_LOCAL=false`).
 
 ## Prerequisites
 
-- A server with a public IP (targets below).
+- A server with a public IP — any Ubuntu 22.04 VM works (DigitalOcean is walked
+  through below).
 - A domain (or subdomain) you can point an `A` record at. The GitHub Student
   Developer Pack includes a free Namecheap `.me` domain for a year.
 - A `GROQ_API_KEY` (free tier) for classification.
 
 ---
 
-## Target A — Oracle Cloud Always Free (recommended)
+## The server
 
-The Ampere A1 shape (up to **4 ARM cores / 24 GB**, always free) is the only
-forever-free tier big enough for the whole stack. Treat the VM as disposable:
-nothing precious lives on it, because `git` + `seed_all.sh` rebuild it.
+Any Ubuntu 22.04 host with a public IP runs this stack the same way. A
+**DigitalOcean** 4 GB / 2 vCPU droplet is the worked example below — the GitHub
+Student Pack's $200 credit covers roughly eight months of it. Treat the VM as
+disposable: nothing precious lives on it, because `git` + `seed_all.sh` rebuild
+its entire state from scratch.
 
-1. **Create the instance.** VM.Standard.A1.Flex, Ubuntu 22.04 (aarch64),
-   4 OCPU / 24 GB. If you hit *"Out of host capacity"*, that's the known
-   always-free lottery — retry in another availability domain or a few hours
-   later.
+1. **Create the droplet.** Ubuntu 22.04 (x64), Basic **4 GB / 2 vCPU**, in the
+   region nearest you (e.g. Bangalore `BLR1`). Add your SSH public key during
+   creation. Ports 80/443 are open by default.
 
-2. **Open the ports — in BOTH places.** This is the #1 Oracle gotcha: the cloud
-   VCN *and* the instance firewall block by default.
-   - In the VCN **Security List** (or an NSG on the VNIC), add ingress rules for
-     TCP **80** and **443** from `0.0.0.0/0`.
-   - On the instance, Oracle's Ubuntu image ships locked-down iptables. Open and
-     persist 80/443:
+2. **Give a 4 GB box headroom.** It's tighter on RAM than a large VM, so:
+   - Keep the default **Groq-only** path (don't enable `local-llm`; Ollama + a
+     3B model won't fit).
+   - Cap Neo4j's memory so it can't OOM the box — add to the `neo4j` service
+     `environment:` in `docker-compose.prod.yml`:
+     ```yaml
+     NEO4J_server_memory_heap_max__size: 512m
+     NEO4J_server_memory_pagecache_size: 512m
+     ```
+   - Add swap as a safety net:
      ```bash
-     sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 80  -j ACCEPT
-     sudo iptables -I INPUT 6 -m state --state NEW -p tcp --dport 443 -j ACCEPT
-     sudo netfilter-persistent save
+     sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
+     sudo mkswap /swapfile && sudo swapon /swapfile
+     echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
      ```
 
-3. **Install Docker** (the convenience script handles arm64):
+3. **Install Docker:**
    ```bash
    curl -fsSL https://get.docker.com | sudo sh
    sudo usermod -aG docker "$USER" && newgrp docker
    ```
 
-4. **Point DNS at the box.** Create an `A` record for your domain → the
-   instance's public IP, and *wait for it to resolve* (`dig +short your.domain`)
-   before bringing Caddy up — the TLS challenge fails if the name doesn't
-   resolve yet.
+4. **Point DNS at the box.** Create an `A` record for your domain → the droplet's
+   public IP, and *wait for it to resolve* (`dig +short your.domain`) before
+   bringing Caddy up — the TLS challenge fails if the name doesn't resolve yet.
 
 5. **Clone, configure, launch** (see [Bring-up](#bring-up) below).
-
-> **ARM note:** every image in the stack (postgres, redis, qdrant, neo4j,
-> caddy, ollama, `python:3.11-slim`) is multi-arch, so it all runs natively on
-> aarch64. First build is slower than x86 because torch / sentence-transformers
-> compile/download arm64 wheels — that's a one-time cost.
-
----
-
-## Target B — DigitalOcean droplet (fallback)
-
-A 4 GB / 2 vCPU droplet (x86) on the Student Pack's $200 credit lasts ~8 months.
-It's tighter on RAM, so:
-
-- Keep the default **Groq-only** path (don't enable `local-llm`; Ollama + a 3B
-  won't fit).
-- Cap Neo4j's memory so it doesn't OOM the box — add to the `neo4j` service
-  `environment:` in `docker-compose.prod.yml`:
-  ```yaml
-  NEO4J_server_memory_heap_max__size: 512m
-  NEO4J_server_memory_pagecache_size: 512m
-  ```
-- Add swap as a safety net:
-  ```bash
-  sudo fallocate -l 2G /swapfile && sudo chmod 600 /swapfile
-  sudo mkswap /swapfile && sudo swapon /swapfile
-  echo '/swapfile none swap sw 0 0' | sudo tee -a /etc/fstab
-  ```
-
-Ports 80/443 are open by default on DO; otherwise the bring-up is identical.
 
 ---
 
@@ -162,16 +138,15 @@ request.
 
 - **Certificate never issues / site shows a TLS error.** Check, in order: the
   `A` record resolves (`dig +short your.domain`), ports 80 **and** 443 are open
-  in *both* the cloud firewall and the host iptables, and `ACME_EMAIL`/`DOMAIN`
-  are set in `.env.production`. Watch `docker compose -f docker-compose.prod.yml
-  logs -f caddy`. While testing repeatedly, switch to Let's Encrypt staging to
-  avoid the 5-duplicate-certs-per-week rate limit — add `acme_ca
-  https://acme-staging-v02.api.letsencrypt.org/directory` to the global options
-  block in `Caddyfile`, then remove it for the real cert.
+  in your cloud firewall, and `ACME_EMAIL`/`DOMAIN` are set in `.env.production`.
+  Watch `docker compose -f docker-compose.prod.yml logs -f caddy`. While testing
+  repeatedly, switch to Let's Encrypt staging to avoid the 5-duplicate-certs-per-week
+  rate limit — add `acme_ca https://acme-staging-v02.api.letsencrypt.org/directory`
+  to the global options block in `Caddyfile`, then remove it for the real cert.
 - **App loads but hangs on "Please wait…".** That's the Streamlit WebSocket
   being blocked. The prod frontend already disables Streamlit's own CORS/XSRF
   checks for exactly this reason; confirm Caddy is proxying `frontend:8501` and
   the frontend container is healthy.
-- **A container is killed with exit code 137.** Out of memory — you're on a
-  small VM with Ollama or an uncapped Neo4j. Stay on the Groq-only default and
-  apply the Neo4j memory caps + swap from Target B.
+- **A container is killed with exit code 137.** Out of memory — apply the Neo4j
+  memory caps + swap above, and stay on the Groq-only default (don't enable
+  `local-llm`).
