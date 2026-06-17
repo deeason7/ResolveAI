@@ -67,6 +67,14 @@ dev = [
     "aiosqlite>=0.20,<1.0",         # sqlite driver for the test conftest
 ]
 
+[tool.setuptools.packages.find]
+# Flat layout with two top-level dirs (app/ + alembic/). Only `app` is an
+# importable package — alembic runs via its CLI + alembic.ini, and tests aren't
+# installed — so scope package discovery to app*. Without this, building the
+# project (uv sync / pip install -e .) fails with setuptools' "Multiple
+# top-level packages discovered in a flat-layout" guard.
+include = ["app*"]
+
 [tool.ruff]
 line-length = 100
 target-version = "py311"
