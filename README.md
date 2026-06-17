@@ -166,6 +166,24 @@ docker compose exec -d api python -m app.workers.classification_worker
 docker compose exec -d api python -m app.workers.resolution_worker
 ```
 
+## Deploy
+
+Putting this on a server with a public URL is a separate, self-contained setup:
+a production Compose file that ships the built images, runs the stream workers
+as services, keeps every datastore on the internal network, and puts **Caddy**
+in front to terminate TLS with an auto-provisioned Let's Encrypt certificate —
+only ports 80/443 are exposed.
+
+```bash
+cp .env.production.example .env.production   # set a domain + real secrets
+docker compose -f docker-compose.prod.yml up -d --build
+./scripts/seed_all.sh                        # migrations + corpus + graph
+```
+
+The full runbook — an Oracle Cloud Always Free (ARM) walkthrough, a
+DigitalOcean fallback, DNS/TLS, backups and troubleshooting — is in
+[`docs/deployment.md`](docs/deployment.md).
+
 ## Development
 
 ```bash
@@ -211,8 +229,5 @@ engine adds its own PII redaction on the way out.
 
 ## Roadmap
 
-- CI pipeline (GitHub Actions: ruff + pytest with a Postgres service)
-- Worker-side TPM pacing/backoff for cloud rate limits
-- Per-route rate limits wired to the limiter middleware
-- Resolution-rate analytics once enough reviewed resolutions accumulate
-- Backend-enforced viewer role for the demo account
+- Resolution-rate analytics, once enough reviewed resolutions accumulate to make
+  the number meaningful

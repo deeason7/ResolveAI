@@ -1,0 +1,178 @@
+# Production topology for ResolveAI.
+#
+# Use this file on its own — NOT as an overlay on docker-compose.yml:
+#   docker compose -f docker-compose.prod.yml up -d --build
+#
+# Why standalone instead of an override: Compose *concatenates* list keys like
+# `volumes` when merging files, so an override can't remove the dev source
+# bind-mount (./backend:/app) that would otherwise shadow the built image. A
+# self-contained file is the clean way to ship images as the artifact.
+#
+# How prod differs from dev:
+#   - built images, no source bind-mounts, no uvicorn --reload
+#   - only Caddy is published to the internet (80/443); the API and every
+#     datastore stay on the internal network with no host ports
+#   - the two stream workers run as restart-on-failure services
+#   - Ollama is opt-in behind the `local-llm` profile; by default we classify
+#     through Groq (LLM_SKIP_LOCAL=true) — the right call for ARM/low-RAM hosts
+#
+# Every service is self-sufficient from .env.production (no ${..} interpolation),
+# so there's no "forgot --env-file" footgun.
+
+x-backend-common: &backend-common
+  env_file: .env.production
+  restart: unless-stopped
+  depends_on:
+    postgres:
+      condition: service_healthy
+    redis:
+      condition: service_healthy
+    qdrant:
+      condition: service_healthy
+    neo4j:
+      condition: service_healthy
+
+services:
+
+  # ── Reverse proxy + automatic TLS ──────────────────────────────────────────
+  caddy:
+    image: caddy:2.8-alpine
+    restart: unless-stopped
+    env_file: .env.production          # DOMAIN + ACME_EMAIL, read by the Caddyfile
+    ports:
+      - "80:80"
+      - "443:443"
+      - "443:443/udp"                  # HTTP/3
+    volumes:
+      - ./Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data               # ACME account + issued certs — MUST persist
+      - caddy_config:/config
+    depends_on:
+      - frontend
+
+  # ── Streamlit frontend (the only thing behind the proxy) ───────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    image: resolveai/frontend:latest
+    restart: unless-stopped
+    env_file: .env.production
+    environment:
+      # Streamlit sits behind Caddy on a single origin; turning off its own CORS
+      # and XSRF checks is the standard reverse-proxy recipe. Auth lives in the
+      # API (httpOnly cookie), and Caddy is the sole ingress, so nothing is lost.
+      STREAMLIT_SERVER_ENABLE_CORS: "false"
+      STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "false"
+    expose:
+      - "8501"
+    depends_on:
+      api:
+        condition: service_healthy
+
+  # ── FastAPI backend (internal only) ────────────────────────────────────────
+  api:
+    <<: *backend-common
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    image: resolveai/api:latest        # tagged here so the workers can reuse it
+    # Drop the dev --reload baked into the Dockerfile CMD. One worker on purpose:
+    # the slowapi limiter keeps per-process counters, so scaling out would need a
+    # shared (redis) limiter backend first.
+    command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
+    expose:
+      - "8000"
+    volumes:
+      # Seed inputs + tools live outside the backend build context, so the seeder
+      # needs them mounted. Read-only where nothing writes back; fine_tuning is
+      # writable because the CFPB download lands its CSV there.
+      - ./scripts:/scripts:ro
+      - ./graph_seed:/graph_seed:ro
+      - ./fine_tuning:/fine_tuning
+
+  # ── Stream workers (same image as the API, different entrypoint) ───────────
+  classification-worker:
+    <<: *backend-common
+    image: resolveai/api:latest
+    command: ["python", "-m", "app.workers.classification_worker"]
+
+  resolution-worker:
+    <<: *backend-common
+    image: resolveai/api:latest
+    command: ["python", "-m", "app.workers.resolution_worker"]
+
+  # ── Datastores (internal only — no host ports in prod) ─────────────────────
+  postgres:
+    image: postgres:16.3-alpine
+    restart: unless-stopped
+    env_file: .env.production          # POSTGRES_USER/PASSWORD/DB
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7.2-alpine
+    restart: unless-stopped
+    env_file: .env.production
+    # $$ escapes Compose interpolation so the container shell expands the var
+    # from the injected env at runtime; exec keeps redis as PID 1 for signals.
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$$REDIS_PASSWORD\" ping | grep -q PONG"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  qdrant:
+    image: qdrant/qdrant:v1.13.6
+    restart: unless-stopped
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: ["CMD-SHELL", "bash -c '> /dev/tcp/localhost/6333' 2>/dev/null || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  neo4j:
+    image: neo4j:5.19-community
+    restart: unless-stopped
+    env_file: .env.production          # NEO4J_AUTH
+    environment:
+      NEO4J_PLUGINS: '["apoc"]'
+    volumes:
+      - neo4j_data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+  # ── Optional local LLM — only with: --profile local-llm ────────────────────
+  ollama:
+    image: ollama/ollama:0.2.0
+    profiles: ["local-llm"]
+    restart: unless-stopped
+    volumes:
+      - ollama_data:/root/.ollama
+    healthcheck:
+      test: ["CMD-SHELL", "ollama list >/dev/null 2>&1 || exit 1"]
+      interval: 15s
+      timeout: 10s
+      retries: 10
+
+volumes:
+  postgres_data:
+  redis_data:
+  qdrant_data:
+  neo4j_data:
+  ollama_data:
+  caddy_data:
+  caddy_config:

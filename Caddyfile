@@ -1,0 +1,25 @@
+# ResolveAI reverse proxy.
+#
+# Caddy terminates TLS (auto-provisioned and auto-renewed from Let's Encrypt for
+# $DOMAIN) and proxies the public site to the Streamlit frontend. The API and
+# every datastore stay on the internal Docker network with no public route — the
+# browser only ever talks to Streamlit, which calls the API server-side.
+#
+# $DOMAIN and $ACME_EMAIL are injected from .env.production.
+{
+	email {$ACME_EMAIL}
+}
+
+{$DOMAIN} {
+	encode zstd gzip
+	# Streamlit's live updates run over WebSockets; reverse_proxy upgrades them
+	# transparently, so no extra config is needed here.
+	reverse_proxy frontend:8501
+}
+
+# Optional: publish the API's OpenAPI docs at api.<domain>. This exposes the
+# whole API — reads become public; writes stay JWT + writer-role gated. Add an
+# A record for api.$DOMAIN first, then uncomment.
+# api.{$DOMAIN} {
+# 	reverse_proxy api:8000
+# }
