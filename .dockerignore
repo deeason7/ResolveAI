@@ -1,0 +1,22 @@
+# Build-context trimming for the root (Hugging Face Space) image. That build's
+# context is the repo root and it bundles only backend/, so keep the 800 MB+ dev
+# virtualenv, caches, and VCS metadata out — they'd bloat the image and bust the
+# layer cache on every change. (Does not affect the compose builds, whose
+# context is ./backend or ./frontend.)
+.git/
+.gitignore
+**/.venv/
+**/__pycache__/
+**/*.pyc
+**/.ruff_cache/
+**/*.egg-info/
+.env
+.env.*
+
+# Not part of the single-container API image (the API + workers live in backend/)
+frontend/
+fine_tuning/
+graph_seed/
+scripts/
+docs/
+*.md

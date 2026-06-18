@@ -184,9 +184,17 @@ class VectorStore:
 
 @lru_cache(maxsize=1)
 def get_default_store() -> VectorStore:
-    """Process-wide singleton wired to the configured Qdrant instance."""
-    log.info("connecting to Qdrant at %s:%d", settings.qdrant_host, settings.qdrant_port)
-    client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
+    """Process-wide singleton wired to the configured Qdrant instance.
+
+    A non-empty ``qdrant_url`` selects a managed cluster (Qdrant Cloud) over
+    HTTPS with an API key; otherwise we use the local host/port path.
+    """
+    if settings.qdrant_url:
+        log.info("connecting to Qdrant Cloud at %s", settings.qdrant_url)
+        client = QdrantClient(url=settings.qdrant_url, api_key=settings.qdrant_api_key or None)
+    else:
+        log.info("connecting to Qdrant at %s:%d", settings.qdrant_host, settings.qdrant_port)
+        client = QdrantClient(host=settings.qdrant_host, port=settings.qdrant_port)
     store = VectorStore(client)
     store.ensure_collection()
     return store

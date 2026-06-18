@@ -41,10 +41,15 @@ def do_run_migrations(connection):
 
 
 async def run_async_migrations() -> None:
+    engine_kwargs: dict = {}
+    if os.environ.get("DB_REQUIRE_SSL", "").lower() in ("1", "true", "yes"):
+        # Managed Postgres (Neon) needs TLS; asyncpg ignores sslmode= in the URL.
+        engine_kwargs["connect_args"] = {"ssl": True}
     connectable = async_engine_from_config(
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        **engine_kwargs,
     )
     async with connectable.connect() as connection:
         await connection.run_sync(do_run_migrations)

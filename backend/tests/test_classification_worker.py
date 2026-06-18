@@ -270,3 +270,35 @@ class TestStreamIntegration:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.classified  # processed end-to-end
         assert (await redis_client.xpending(w.stream, w.group))["pending"] == 0  # acked, PEL clear
+
+
+class TestPollCadence:
+    """The knobs that bound idle Redis command volume on a command-billed tier
+    (Upstash free). ``_tick`` is driven directly so the gate is tested without
+    running the unbounded ``run`` loop.
+    """
+
+    async def test_sweeps_only_every_nth_cycle_and_honors_block(
+        self, redis_client, factory, vector_store, monkeypatch
+    ):
+        from app.config import Settings
+
+        sweeps = AsyncMock(return_value=0)
+        monkeypatch.setattr(cw, "reclaim_stale_messages", sweeps)
+        # Empty stream: stub the read so a real BLOCK never stalls the test.
+        redis_client.xreadgroup = AsyncMock(return_value=[])
+
+        settings = Settings(worker_reclaim_every=3, worker_block_ms=250)
+        w = ClassificationWorker(
+            redis_client=redis_client,
+            classifier=_StubClassifier(_outcome()),
+            vector_store=vector_store,
+            session_factory=factory,
+            settings=settings,
+        )
+
+        for cycle in range(6):
+            await w._tick(cycle)
+
+        assert sweeps.await_count == 2  # only cycles 0 and 3
+        assert redis_client.xreadgroup.await_args.kwargs["block"] == 250

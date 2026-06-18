@@ -28,6 +28,10 @@ else:
     _engine_kwargs["pool_pre_ping"] = True
     _engine_kwargs["pool_size"] = 10
     _engine_kwargs["max_overflow"] = 20
+    if settings.db_require_ssl:
+        # asyncpg ignores ?sslmode=; pass ssl=True so managed Postgres (Neon)
+        # connects over a verified TLS channel.
+        _engine_kwargs["connect_args"] = {"ssl": True}
 
 engine = create_async_engine(settings.database_url, **_engine_kwargs)
 

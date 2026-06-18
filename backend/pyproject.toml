@@ -67,6 +67,13 @@ dev = [
     "aiosqlite>=0.20,<1.0",         # sqlite driver for the test conftest
 ]
 
+# Single-container (Hugging Face Space) deployment: supervisor runs the API and
+# both stream workers in one container. Not needed for the compose topology, so
+# it's an opt-in extra rather than a core runtime dependency.
+space = [
+    "supervisor>=4.2,<5.0",
+]
+
 [tool.setuptools.packages.find]
 # Flat layout with two top-level dirs (app/ + alembic/). Only `app` is an
 # importable package — alembic runs via its CLI + alembic.ini, and tests aren't
