@@ -20,8 +20,18 @@ WORKDIR /app
 RUN apt-get update && apt-get install -y --no-install-recommends curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Dependencies first, from pyproject alone, so this layer caches across code
-# changes. The "space" extra adds supervisor on top of the runtime deps.
+# Torch arrives transitively (via sentence-transformers), and pip's default
+# wheel is the CUDA build — it bundles the multi-GB nvidia-* / triton /
+# cuda-toolkit stack, every byte of it useless on a CPU-only Space. Install the
+# CPU wheel first, from PyTorch's own CPU index, so the editable install below
+# finds torch already satisfied and never reaches for the CUDA one. This stays
+# in the Dockerfile (not pyproject) so local/GPU dev still resolves torch
+# normally — it's a deploy-only concern. It's also the heaviest, most stable
+# layer, so it sits above the pyproject COPY to cache independently of dep edits.
+RUN pip install --index-url https://download.pytorch.org/whl/cpu torch
+
+# Then the rest of the deps, from pyproject alone, so this layer caches across
+# code changes. The "space" extra adds supervisor on top of the runtime deps.
 COPY backend/pyproject.toml ./
 RUN pip install -e ".[space]"
 
