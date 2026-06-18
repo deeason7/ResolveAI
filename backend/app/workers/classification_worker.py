@@ -50,9 +50,6 @@ from app.workers.stream_utils import reclaim_stale_messages
 logger = logging.getLogger(__name__)
 
 CONSUMER_GROUP = "classifiers"
-# How long XREADGROUP blocks before returning empty so the loop can re-check the
-# stop flag. Long enough to mostly idle, short enough for a responsive shutdown.
-BLOCK_MS = 5000
 READ_COUNT = 1  # concurrency 1: pull one at a time, keep the model un-thrashed
 
 # Priority blends urgency (primary) with sentiment (secondary) into [0, 1] so the
@@ -150,9 +147,24 @@ class ClassificationWorker:
             self.group,
             self.consumer,
         )
+        cycle = 0
         while not self._stop.is_set():
-            # First rescue anything a dead/slow consumer left stranded in the
-            # PEL — XREADGROUP '>' below would never redeliver those on its own.
+            await self._tick(cycle)
+            cycle += 1
+
+    async def _tick(self, cycle: int) -> None:
+        """One loop iteration: a periodic PEL sweep, then one blocking read.
+
+        Split out of ``run`` so the poll cadence is unit-testable without
+        driving the unbounded loop. The sweep (XAUTOCLAIM) and the read
+        (XREADGROUP) are each one Redis command; on a command-billed managed
+        Redis ``worker_reclaim_every`` thins the sweep to every Nth cycle and
+        ``worker_block_ms`` widens the block, so the free deploy idles within
+        budget while the defaults keep the local loop snappy.
+        """
+        if cycle % self.settings.worker_reclaim_every == 0:
+            # Rescue anything a dead/slow consumer left stranded in the PEL —
+            # XREADGROUP '>' below would never redeliver those on its own.
             await reclaim_stale_messages(
                 self.redis,
                 stream=self.stream,
@@ -161,18 +173,18 @@ class ClassificationWorker:
                 handle=self._handle,
                 min_idle_ms=self.settings.reclaim_min_idle_ms,
             )
-            resp = await self.redis.xreadgroup(
-                groupname=self.group,
-                consumername=self.consumer,
-                streams={self.stream: ">"},
-                count=READ_COUNT,
-                block=BLOCK_MS,
-            )
-            if not resp:
-                continue  # block timed out — loop back and re-check the stop flag
-            for _stream, messages in resp:
-                for message_id, fields in messages:
-                    await self._handle(message_id, fields)
+        resp = await self.redis.xreadgroup(
+            groupname=self.group,
+            consumername=self.consumer,
+            streams={self.stream: ">"},
+            count=READ_COUNT,
+            block=self.settings.worker_block_ms,
+        )
+        if not resp:
+            return  # block timed out — loop back and re-check the stop flag
+        for _stream, messages in resp:
+            for message_id, fields in messages:
+                await self._handle(message_id, fields)
 
     async def _handle(self, message_id: str, fields: dict[str, str]) -> None:
         """Process one message, then ack only if it's truly settled.

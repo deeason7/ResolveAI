@@ -6,6 +6,7 @@ running locally). Inside Docker every value comes from env_file in
 docker-compose.yml, so no .env file ships in the container image.
 """
 
+from pydantic import Field
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -34,6 +35,16 @@ class Settings(BaseSettings):
     # call — from being stolen mid-flight; only a crashed worker's orphans, idle
     # past this, get swept up.
     reclaim_min_idle_ms: int = 60000
+
+    # Worker poll cadence — the two knobs that bound idle Redis command volume.
+    # Each loop spends one XAUTOCLAIM (PEL sweep) + one XREADGROUP (blocking
+    # read): two commands per cycle. On a command-billed managed Redis (Upstash
+    # free tier ~500K/month) the dev defaults idle at ~2 cmds / 5s ≈ 2M/month
+    # per worker — several times over. The free deploy widens the block and
+    # thins the sweep (e.g. 30000 / 4 ≈ 200K/month for both workers); the
+    # defaults keep the local stack's snappy 5s, every-cycle loop.
+    worker_block_ms: int = 5000
+    worker_reclaim_every: int = Field(default=1, ge=1)  # PEL sweep every Nth cycle
 
     # Qdrant
     qdrant_host: str = "qdrant"

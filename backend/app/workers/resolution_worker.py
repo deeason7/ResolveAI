@@ -70,7 +70,6 @@ from app.workers.stream_utils import reclaim_stale_messages
 logger = logging.getLogger(__name__)
 
 CONSUMER_GROUP = "resolvers"
-BLOCK_MS = 5000  # XREADGROUP block window; short enough for responsive shutdown
 READ_COUNT = 1  # one complaint at a time — each costs seconds of LLM calls
 
 # LLMOps operation names. Draft and judge calls have different cost/latency
@@ -203,9 +202,21 @@ class ResolutionWorker:
             self.group,
             self.consumer,
         )
+        cycle = 0
         while not self._stop.is_set():
-            # First rescue anything a dead/slow consumer left stranded in the
-            # PEL — XREADGROUP '>' below would never redeliver those on its own.
+            await self._tick(cycle)
+            cycle += 1
+
+    async def _tick(self, cycle: int) -> None:
+        """One loop iteration: a periodic PEL sweep, then one blocking read.
+
+        Mirrors the classification worker (see its ``_tick``): split out of
+        ``run`` for testability, with ``worker_reclaim_every`` / ``worker_block_ms``
+        thinning idle Redis command volume to fit a command-billed managed tier.
+        """
+        if cycle % self.settings.worker_reclaim_every == 0:
+            # Rescue anything a dead/slow consumer left stranded in the PEL —
+            # XREADGROUP '>' below would never redeliver those on its own.
             await reclaim_stale_messages(
                 self.redis,
                 stream=self.stream,
@@ -214,18 +225,18 @@ class ResolutionWorker:
                 handle=self._handle,
                 min_idle_ms=self.settings.reclaim_min_idle_ms,
             )
-            resp = await self.redis.xreadgroup(
-                groupname=self.group,
-                consumername=self.consumer,
-                streams={self.stream: ">"},
-                count=READ_COUNT,
-                block=BLOCK_MS,
-            )
-            if not resp:
-                continue
-            for _stream, messages in resp:
-                for message_id, fields in messages:
-                    await self._handle(message_id, fields)
+        resp = await self.redis.xreadgroup(
+            groupname=self.group,
+            consumername=self.consumer,
+            streams={self.stream: ">"},
+            count=READ_COUNT,
+            block=self.settings.worker_block_ms,
+        )
+        if not resp:
+            return
+        for _stream, messages in resp:
+            for message_id, fields in messages:
+                await self._handle(message_id, fields)
 
     async def _handle(self, message_id: str, fields: dict[str, str]) -> None:
         """Process one message; ack on success and on poison, never on transient."""

@@ -365,3 +365,36 @@ class TestStreamIntegration:
 
         summary = await redis_client.xpending(w.stream, w.group)
         assert summary["pending"] == 1  # left for a future claim
+
+
+class TestPollCadence:
+    """Mirror of the classification worker's cadence gate (see its
+    TestPollCadence): the PEL sweep runs only every Nth cycle and the read
+    honors the configured block window.
+    """
+
+    async def test_sweeps_only_every_nth_cycle_and_honors_block(
+        self, redis_client, factory, monkeypatch
+    ):
+        from unittest.mock import AsyncMock
+
+        from app.config import Settings
+        from app.workers import resolution_worker as rw
+
+        sweeps = AsyncMock(return_value=0)
+        monkeypatch.setattr(rw, "reclaim_stale_messages", sweeps)
+        redis_client.xreadgroup = AsyncMock(return_value=[])
+
+        settings = Settings(worker_reclaim_every=2, worker_block_ms=30000)
+        w = ResolutionWorker(
+            redis_client=redis_client,
+            session_factory=factory,
+            agent_factory=_stub_factory(_result()),
+            settings=settings,
+        )
+
+        for cycle in range(4):
+            await w._tick(cycle)
+
+        assert sweeps.await_count == 2  # only cycles 0 and 2
+        assert redis_client.xreadgroup.await_args.kwargs["block"] == 30000
