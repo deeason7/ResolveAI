@@ -182,7 +182,9 @@ docker compose -f docker-compose.prod.yml up -d --build
 
 The full runbook — a DigitalOcean walkthrough (any Ubuntu VM works),
 DNS/TLS, backups and troubleshooting — is in
-[`docs/deployment.md`](docs/deployment.md).
+[`docs/deployment.md`](docs/deployment.md). To run it for **$0** on free
+managed tiers (Neon, Upstash, Qdrant Cloud, Aura, Hugging Face, Streamlit)
+instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
 
 ## Development
 
