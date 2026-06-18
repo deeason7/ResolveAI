@@ -88,9 +88,11 @@ fine_tuning/results/
 .env
 .env.production
 .env.local
+.env.free
 *.pem
 *.key
 secrets/
+.streamlit/secrets.toml
 
 # Logs
 *.log

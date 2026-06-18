@@ -1,0 +1,10 @@
+# Streamlit Community Cloud config for the ResolveAI dashboard. Read from the
+# repo root (Community Cloud's working directory). The local compose frontend
+# sets the equivalent server flags via STREAMLIT_SERVER_* env vars instead, so
+# this file is specifically for the hosted free deployment.
+
+[server]
+headless = true
+
+[browser]
+gatherUsageStats = false
