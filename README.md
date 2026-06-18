@@ -1,3 +1,13 @@
+---
+title: ResolveAI
+emoji: 🛠️
+colorFrom: indigo
+colorTo: blue
+sdk: docker
+app_port: 7860
+pinned: false
+---
+
 # ResolveAI — Intelligent Complaint Resolution Engine
 
 A full-stack system that triages real consumer financial complaints, drafts
