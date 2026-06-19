@@ -1,0 +1,37 @@
+# GPU overlay for a single-box live run on an NVIDIA host.
+#
+# Use together with the base prod compose and the local-llm profile:
+#   docker compose -f docker-compose.prod.yml -f docker-compose.gpu.yml --profile local-llm up -d --build
+#
+# What it adds:
+#   - Hands the ollama container the GPU. Needs the NVIDIA driver +
+#     nvidia-container-toolkit on the host; the AWS "Deep Learning Base GPU AMI
+#     (Ubuntu)" ships both, so no driver setup is required.
+#   - Mounts the exported model directory read-only so `ollama create` can read
+#     the GGUF and Modelfile from inside the container (at /models).
+#   - Keeps the model resident in VRAM (KEEP_ALIVE) and serves several requests
+#     concurrently (NUM_PARALLEL) so a batch run isn't bottlenecked on reloads.
+#   - Publishes the API on the host so you can monitor headlessly
+#     (curl localhost:8000/api/v1/health, or /api/docs over an SSH tunnel).
+#
+# If `ollama create` ever errors on the model architecture, bump the ollama
+# image tag to a newer release here — the GGUF itself is self-describing.
+
+services:
+  ollama:
+    environment:
+      - OLLAMA_NUM_PARALLEL=4
+      - OLLAMA_KEEP_ALIVE=-1
+    volumes:
+      - ./fine_tuning/models:/models:ro
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: all
+              capabilities: [gpu]
+
+  api:
+    ports:
+      - "8000:8000"

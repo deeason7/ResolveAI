@@ -276,7 +276,7 @@ def get_default_graph_store() -> GraphStore:
         settings.neo4j_uri,
         auth=(settings.neo4j_user, settings.neo4j_password),
     )
-    return GraphStore(driver)
+    return GraphStore(driver, database=settings.neo4j_database)
 
 
 def reset_default_graph_store() -> None:

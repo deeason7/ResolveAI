@@ -58,6 +58,9 @@ class Settings(BaseSettings):
     neo4j_uri: str
     neo4j_user: str = "neo4j"
     neo4j_password: str
+    # Managed Neo4j (Aura) names the db after the instance id, not "neo4j";
+    # override with NEO4J_DATABASE. Community/Docker keep the single "neo4j".
+    neo4j_database: str = "neo4j"
 
     # Ollama (primary classifier — fine-tuned Qwen2.5-3B served locally)
     ollama_base_url: str = "http://ollama:11434"
