@@ -48,6 +48,25 @@ def store(driver) -> GraphStore:
     return GraphStore(driver)
 
 
+# ---------------- get_default_graph_store wiring ----------------
+
+
+def test_default_store_uses_configured_database(monkeypatch):
+    """The factory wires settings.neo4j_database into the store. Managed Aura
+    names the db after the instance id, not the Community default 'neo4j', so
+    this must follow config rather than the hardcoded fallback."""
+    from app.services import graph_store as gs
+
+    monkeypatch.setattr(gs.settings, "neo4j_uri", "bolt://localhost:7687")
+    monkeypatch.setattr(gs.settings, "neo4j_database", "instance-abc123")
+    gs.reset_default_graph_store()
+    try:
+        built = gs.get_default_graph_store()
+        assert built._database == "instance-abc123"
+    finally:
+        gs.reset_default_graph_store()
+
+
 # ---------------- get_company_profile ----------------
 
 
