@@ -265,7 +265,7 @@ async def seed(top_n: int, reset: bool) -> None:
             len(data["companies"]),
         )
 
-        async with driver.session(database="neo4j") as session:
+        async with driver.session(database=settings.neo4j_database) as session:
             if reset:
                 log.warning("--reset: deleting all nodes and relationships")
                 await session.run("MATCH (n) DETACH DELETE n")
