@@ -1,5 +1,7 @@
 # ResolveAI — Intelligent Complaint Resolution Engine
 
+> 🔗 **Live demo → https://resolveaideeason.streamlit.app/** — the full pipeline running on free, no-credit-card infrastructure ($0/mo). First load may take ~30–60s while the free Space wakes from idle.
+
 A full-stack system that triages real consumer financial complaints, drafts
 regulation-aware responses with an agent, validates every draft through a
 layered guardrail engine, and keeps a human reviewer in charge of the final
@@ -14,7 +16,7 @@ grounding and tone → a reviewer approves or rejects with feedback that feeds
 regeneration. Every model call is metered into an LLMOps log you can browse
 in the dashboard.
 
-> **Just want to look around?** Run the stack and hit **Launch the demo** on
+> **Just want to look around?** Open the [live demo](https://resolveaideeason.streamlit.app/) — or run the stack locally — and hit **Launch the demo** on
 > the login screen — a read-only guided tour that walks every page and
 > explains both the product and the architecture as you go (each page carries
 > an "Under the hood" panel with the engineering decisions behind it).
