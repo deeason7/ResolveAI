@@ -1,0 +1,22 @@
+# CPU overlay for a single-box live run on a non-GPU host.
+#
+# Same role as docker-compose.gpu.yml but WITHOUT the GPU device reservation,
+# so it works on a plain CPU instance (the fine-tuned model runs on CPU via
+# llama.cpp inside Ollama — slower than GPU, but no GPU quota required).
+#
+#   OVERLAY=docker-compose.cpu.yml ./scripts/box_bootstrap.sh
+#
+# Parallelism is kept modest: CPU inference is memory-bandwidth bound, so piling
+# on parallel requests yields little and just contends with the rest of the stack.
+
+services:
+  ollama:
+    environment:
+      - OLLAMA_NUM_PARALLEL=2
+      - OLLAMA_KEEP_ALIVE=-1
+    volumes:
+      - ./fine_tuning/models:/models:ro
+
+  api:
+    ports:
+      - "8000:8000"
