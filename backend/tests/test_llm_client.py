@@ -21,6 +21,7 @@ from app.services.llm_client import (
     LLMResponse,
     LLMUnavailableError,
     Provider,
+    _estimate_prompt_tokens,
     _retry_after_seconds,
     get_llm_client,
     reset_llm_client,
@@ -32,9 +33,11 @@ def _settings(
     skip_local: bool = False,
     rate_limit_retries: int = 2,
     rate_limit_backoff_s: float = 0.0,
+    tpm_limit: int = 0,
 ) -> SimpleNamespace:
     # rate_limit_backoff_s defaults to 0.0 so tests that hit the no-header path
-    # don't actually sleep.
+    # don't actually sleep. tpm_limit defaults to 0 so the token bucket is off
+    # and the transport behavior stays identical to the pre-pacing suite.
     return SimpleNamespace(
         llm_timeout_s=5.0,
         classification_max_retries=1,
@@ -46,6 +49,7 @@ def _settings(
         llm_skip_local=skip_local,
         llm_rate_limit_retries=rate_limit_retries,
         llm_rate_limit_backoff_s=rate_limit_backoff_s,
+        groq_tpm_limit=tpm_limit,
     )
 
 
@@ -264,3 +268,55 @@ class TestSingleton:
         reset_llm_client()
         assert get_llm_client() is not a
         reset_llm_client()
+
+
+class _RecordingLimiter:
+    """A test spy: captures acquire/reconcile calls and never sleeps."""
+
+    def __init__(self) -> None:
+        self.acquired: list[float] = []
+        self.reconciled: list[float] = []
+
+    def acquire(self, tokens: float) -> float:
+        self.acquired.append(tokens)
+        return 0.0
+
+    def reconcile(self, delta: float) -> None:
+        self.reconciled.append(delta)
+
+
+class TestTpmPacing:
+    def test_no_limiter_when_tpm_disabled(self):
+        c = LLMClient(settings=_settings(groq_key="gk", tpm_limit=0))
+        assert c._limiter is None
+
+    def test_limiter_built_when_tpm_enabled(self):
+        c = LLMClient(settings=_settings(groq_key="gk", tpm_limit=12000))
+        assert c._limiter is not None
+
+    def test_groq_call_is_paced_and_reconciled(self):
+        lim = _RecordingLimiter()
+        good = _FakeClient(result=(_Dummy(x=1), _completion(prompt=10, completion=5)))
+        c = LLMClient(settings=_settings(groq_key="gk", skip_local=True), limiter=lim)
+        c._clients[Provider.GROQ] = good
+        messages = [{"role": "user", "content": "x" * 40}]
+        resp = c.structured(_Dummy, messages)
+        est = _estimate_prompt_tokens(messages)  # 40/4 + 400 = 410
+        assert resp.provider == Provider.GROQ
+        assert lim.acquired == [est]  # paced BEFORE the call
+        assert lim.reconciled == [(10 + 5) - est]  # trued up with real usage
+
+    def test_local_provider_is_not_paced(self):
+        # Ollama has no TPM cap, so the bucket must stay untouched on that path.
+        lim = _RecordingLimiter()
+        fake = _FakeClient(result=(_Dummy(x=1), _completion()))
+        c = LLMClient(settings=_settings(groq_key="", skip_local=False), limiter=lim)
+        c._clients[Provider.OLLAMA] = fake
+        c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert lim.acquired == []
+        assert lim.reconciled == []
+
+    def test_estimate_grows_with_message_length(self):
+        short = _estimate_prompt_tokens([{"role": "user", "content": "hi"}])
+        long = _estimate_prompt_tokens([{"role": "user", "content": "hi" * 100}])
+        assert long > short
