@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.config import settings as default_settings
+from app.services.rate_limit import TokenBucketLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,25 @@ def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
     return max(0.0, min(wait, _MAX_BACKOFF_S))
 
 
+# --- Proactive TPM pacing (cloud free tiers meter tokens/min, not requests) ---
+# A pre-call token estimate: ~4 chars/token is the usual English ballpark, plus
+# a flat completion allowance we can't know until the response. reconcile()
+# trues this up against real usage after each call, so the estimate only has to
+# be roughly right to pace the *first* burst — the part backoff can't catch.
+_CHARS_PER_TOKEN = 4.0
+_COMPLETION_TOKEN_ALLOWANCE = 400
+# Shave the advertised limit: estimate error plus cross-process slop (the API
+# and both workers each hold their own in-process bucket but share one Groq
+# budget) shouldn't nudge us back over the wall.
+_TPM_SAFETY = 0.9
+
+
+def _estimate_prompt_tokens(messages: list[dict[str, str]]) -> int:
+    """Cheap pre-call token estimate: chars/4 over content + a completion allowance."""
+    chars = sum(len(m.get("content", "")) for m in messages)
+    return int(chars / _CHARS_PER_TOKEN) + _COMPLETION_TOKEN_ALLOWANCE
+
+
 class Provider(str, Enum):
     OLLAMA = "ollama"
     GROQ = "groq"
@@ -104,10 +124,20 @@ class LLMClient:
     and :meth:`structured` walks the chain until one succeeds.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        limiter: TokenBucketLimiter | None = None,
+    ) -> None:
         self.settings = settings or default_settings
         self.timeout_s = self.settings.llm_timeout_s
         self._chain: list[_ProviderCfg] = self._build_chain(self.settings)
+        # Proactive TPM pacing for the cloud provider (None => disabled). An
+        # explicit limiter overrides the settings-built one so tests can watch it.
+        self._limiter: TokenBucketLimiter | None = (
+            limiter if limiter is not None else self._build_limiter(self.settings)
+        )
         self._clients: dict[Provider, instructor.Instructor] = {}
         for cfg in self._chain:
             # max_retries=0: let instructor own the (validation) retry budget;
@@ -152,6 +182,21 @@ class LLMClient:
                 )
             )
         return chain
+
+    @staticmethod
+    def _build_limiter(settings: Settings) -> TokenBucketLimiter | None:
+        """A TPM bucket for the cloud provider, or None when pacing is off.
+
+        ``groq_tpm_limit <= 0`` (the local-first default) means no bucket —
+        Ollama has no such cap and existing behavior stays byte-identical. The
+        managed-tier deploy sets it to the provider's tokens/min. Capacity is one
+        minute's worth, shaved by ``_TPM_SAFETY`` for headroom.
+        """
+        tpm = getattr(settings, "groq_tpm_limit", 0)
+        if tpm and tpm > 0:
+            effective = tpm * _TPM_SAFETY
+            return TokenBucketLimiter(rate_per_sec=effective / 60.0, capacity=effective)
+        return None
 
     def structured(
         self,
@@ -210,6 +255,11 @@ class LLMClient:
         temperature: float,
     ) -> LLMResponse[T]:
         client = self._clients[cfg.provider]
+        # Proactive TPM pacing: only the cloud provider is rate-capped, and only
+        # when a bucket is configured. Estimate the cost up front, then true it
+        # up against real usage once the call returns.
+        paced = self._limiter is not None and cfg.provider is Provider.GROQ
+        estimated_tokens = _estimate_prompt_tokens(messages) if paced else 0
         # Same-provider retry budget for 429s only. We sit inside _attempt (one
         # provider) rather than structured() (the cross-provider chain) because
         # a rate limit means "this provider is fine, just wait" — not "this
@@ -218,6 +268,11 @@ class LLMClient:
         # wall time, excluding the backoff sleeps (which aren't model latency).
         attempt = 0
         while True:
+            if paced:
+                # Block until the budget can cover this call — the sleep that
+                # keeps a burst from ever reaching the 429. Safe to block here:
+                # every structured() caller runs under asyncio.to_thread.
+                self._limiter.acquire(estimated_tokens)
             started = time.perf_counter()
             try:
                 obj, completion = client.chat.completions.create_with_completion(
@@ -246,6 +301,13 @@ class LLMClient:
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        if paced:
+            # Correct the bucket by (actual - estimate) so long-run throughput
+            # tracks the real limit rather than our up-front guess.
+            self._limiter.reconcile((prompt_tokens + completion_tokens) - estimated_tokens)
+
         try:
             raw_json = completion.choices[0].message.content or ""
         except (AttributeError, IndexError):
@@ -255,8 +317,8 @@ class LLMClient:
             data=obj,
             provider=cfg.provider,
             model=cfg.model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             is_fallback=is_fallback,
             raw_json=raw_json,

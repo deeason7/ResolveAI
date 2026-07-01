@@ -83,6 +83,15 @@ class Settings(BaseSettings):
     llm_rate_limit_retries: int = 5
     # Wait used only when a 429 carries no usable Retry-After header.
     llm_rate_limit_backoff_s: float = 10.0
+    # Proactive tokens-per-minute pacing for the cloud provider. Groq's free
+    # tier meters *tokens* per minute (~12K for llama-3.3-70b); a burst of
+    # back-to-back completions trips it, and instructor swallows the 429 into a
+    # retry exception before the reactive Retry-After backoff above can see it —
+    # so the call fail-closes to the deterministic fallback. A token bucket
+    # sized to this many tokens/min paces calls BEFORE they reach the provider.
+    # 0 disables it: the local-first default needs no cap (Ollama has none), so
+    # only the managed-tier deploy sets it (GROQ_TPM_LIMIT).
+    groq_tpm_limit: int = 0
     # Drop the local Ollama provider and go straight to the cloud fallback.
     # Default off (the design is local-first); turn on for hardware that can't
     # serve the local SLM, so each request doesn't eat a guaranteed local
