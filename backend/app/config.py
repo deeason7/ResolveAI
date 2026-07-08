@@ -69,7 +69,12 @@ class Settings(BaseSettings):
     # Cloud LLM fallbacks (OpenAI-compatible)
     groq_api_key: str = ""
     groq_base_url: str = "https://api.groq.com/openai/v1"
-    groq_model: str = "llama-3.3-70b-versatile"
+    # Groq deprecated llama-3.3-70b-versatile (free/dev tier EOL 2026-08-16).
+    # openai/gpt-oss-120b is Groq's recommended replacement: larger, cheaper
+    # ($0.15/$0.60 vs 0.59/0.79 per Mtok), and clean JSON under instructor
+    # Mode.JSON — its chain-of-thought stays in a separate reasoning field, not
+    # the content. Override with GROQ_MODEL when Groq next moves the model.
+    groq_model: str = "openai/gpt-oss-120b"
     openai_api_key: str = ""
 
     # LLM client behavior
@@ -84,7 +89,7 @@ class Settings(BaseSettings):
     # Wait used only when a 429 carries no usable Retry-After header.
     llm_rate_limit_backoff_s: float = 10.0
     # Proactive tokens-per-minute pacing for the cloud provider. Groq's free
-    # tier meters *tokens* per minute (~12K for llama-3.3-70b); a burst of
+    # tier meters *tokens* per minute (~12K on the free tier); a burst of
     # back-to-back completions trips it, and instructor swallows the 429 into a
     # retry exception before the reactive Retry-After backoff above can see it —
     # so the call fail-closes to the deterministic fallback. A token bucket
