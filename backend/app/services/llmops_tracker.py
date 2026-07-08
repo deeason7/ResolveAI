@@ -19,6 +19,9 @@ logger = logging.getLogger(__name__)
 # USD per 1,000,000 tokens, as (input_rate, output_rate). Local Ollama is free
 # and intentionally absent. Adding a cloud model is a one-line change here.
 _PRICING_PER_MTOK: dict[str, tuple[float, float]] = {
+    # Current cloud model. Superseded entries stay so historical LLMLog rows
+    # (logged under the old model) still price correctly after a migration.
+    "openai/gpt-oss-120b": (0.15, 0.60),
     "llama-3.3-70b-versatile": (0.59, 0.79),
 }
 

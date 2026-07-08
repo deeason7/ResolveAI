@@ -24,6 +24,7 @@ from pydantic import BaseModel
 
 from app.config import Settings
 from app.config import settings as default_settings
+from app.services.rate_limit import TokenBucketLimiter
 
 logger = logging.getLogger(__name__)
 
@@ -65,6 +66,49 @@ def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
     return max(0.0, min(wait, _MAX_BACKOFF_S))
 
 
+def _as_rate_limit_error(exc: BaseException) -> RateLimitError | None:
+    """Recover the ``RateLimitError`` behind a 429, unwrapping instructor if needed.
+
+    A bare ``RateLimitError`` is returned as-is. But instructor runs its own
+    retry loop *inside* ``create_with_completion``; when a burst 429 outlives
+    that budget it re-raises ``InstructorRetryException`` with the original 429
+    chained underneath. Left unexamined that reads as a generic provider failure
+    and we fail-close to the fallback chain -- so we walk the ``__cause__`` /
+    ``__context__`` chain to tell "wait and retry this provider" (a rate limit)
+    apart from "this provider is broken" (anything else). Returns ``None`` when
+    no 429 is in the chain, i.e. the caller should move on to the next provider.
+    """
+    current: BaseException | None = exc
+    # Cause chains are short; the bound is just a guard against a cyclic chain.
+    for _ in range(10):
+        if isinstance(current, RateLimitError):
+            return current
+        nxt = current.__cause__ or current.__context__
+        if nxt is None:
+            break
+        current = nxt
+    return None
+
+
+# --- Proactive TPM pacing (cloud free tiers meter tokens/min, not requests) ---
+# A pre-call token estimate: ~4 chars/token is the usual English ballpark, plus
+# a flat completion allowance we can't know until the response. reconcile()
+# trues this up against real usage after each call, so the estimate only has to
+# be roughly right to pace the *first* burst — the part backoff can't catch.
+_CHARS_PER_TOKEN = 4.0
+_COMPLETION_TOKEN_ALLOWANCE = 400
+# Shave the advertised limit: estimate error plus cross-process slop (the API
+# and both workers each hold their own in-process bucket but share one Groq
+# budget) shouldn't nudge us back over the wall.
+_TPM_SAFETY = 0.9
+
+
+def _estimate_prompt_tokens(messages: list[dict[str, str]]) -> int:
+    """Cheap pre-call token estimate: chars/4 over content + a completion allowance."""
+    chars = sum(len(m.get("content", "")) for m in messages)
+    return int(chars / _CHARS_PER_TOKEN) + _COMPLETION_TOKEN_ALLOWANCE
+
+
 class Provider(str, Enum):
     OLLAMA = "ollama"
     GROQ = "groq"
@@ -104,10 +148,20 @@ class LLMClient:
     and :meth:`structured` walks the chain until one succeeds.
     """
 
-    def __init__(self, settings: Settings | None = None) -> None:
+    def __init__(
+        self,
+        settings: Settings | None = None,
+        *,
+        limiter: TokenBucketLimiter | None = None,
+    ) -> None:
         self.settings = settings or default_settings
         self.timeout_s = self.settings.llm_timeout_s
         self._chain: list[_ProviderCfg] = self._build_chain(self.settings)
+        # Proactive TPM pacing for the cloud provider (None => disabled). An
+        # explicit limiter overrides the settings-built one so tests can watch it.
+        self._limiter: TokenBucketLimiter | None = (
+            limiter if limiter is not None else self._build_limiter(self.settings)
+        )
         self._clients: dict[Provider, instructor.Instructor] = {}
         for cfg in self._chain:
             # max_retries=0: let instructor own the (validation) retry budget;
@@ -152,6 +206,21 @@ class LLMClient:
                 )
             )
         return chain
+
+    @staticmethod
+    def _build_limiter(settings: Settings) -> TokenBucketLimiter | None:
+        """A TPM bucket for the cloud provider, or None when pacing is off.
+
+        ``groq_tpm_limit <= 0`` (the local-first default) means no bucket —
+        Ollama has no such cap and existing behavior stays byte-identical. The
+        managed-tier deploy sets it to the provider's tokens/min. Capacity is one
+        minute's worth, shaved by ``_TPM_SAFETY`` for headroom.
+        """
+        tpm = getattr(settings, "groq_tpm_limit", 0)
+        if tpm and tpm > 0:
+            effective = tpm * _TPM_SAFETY
+            return TokenBucketLimiter(rate_per_sec=effective / 60.0, capacity=effective)
+        return None
 
     def structured(
         self,
@@ -210,6 +279,11 @@ class LLMClient:
         temperature: float,
     ) -> LLMResponse[T]:
         client = self._clients[cfg.provider]
+        # Proactive TPM pacing: only the cloud provider is rate-capped, and only
+        # when a bucket is configured. Estimate the cost up front, then true it
+        # up against real usage once the call returns.
+        paced = self._limiter is not None and cfg.provider is Provider.GROQ
+        estimated_tokens = _estimate_prompt_tokens(messages) if paced else 0
         # Same-provider retry budget for 429s only. We sit inside _attempt (one
         # provider) rather than structured() (the cross-provider chain) because
         # a rate limit means "this provider is fine, just wait" — not "this
@@ -218,6 +292,11 @@ class LLMClient:
         # wall time, excluding the backoff sleeps (which aren't model latency).
         attempt = 0
         while True:
+            if paced:
+                # Block until the budget can cover this call — the sleep that
+                # keeps a burst from ever reaching the 429. Safe to block here:
+                # every structured() caller runs under asyncio.to_thread.
+                self._limiter.acquire(estimated_tokens)
             started = time.perf_counter()
             try:
                 obj, completion = client.chat.completions.create_with_completion(
@@ -228,15 +307,23 @@ class LLMClient:
                     temperature=temperature,
                 )
                 break
-            except RateLimitError as exc:
-                if attempt >= self.settings.llm_rate_limit_retries:
-                    # Budget exhausted — re-raise so structured() can fall back
-                    # to the next provider (or surface LLMUnavailableError).
+            except (RateLimitError, InstructorRetryException) as exc:
+                # A 429 can arrive bare, or wrapped by instructor's own retry
+                # loop once its budget is spent. Unwrap to find out which -- a
+                # non-429 (e.g. exhausted validation retries) means this provider
+                # genuinely failed, so re-raise and let structured() move on.
+                rate_error = _as_rate_limit_error(exc)
+                if rate_error is None:
                     raise
-                wait_s = _retry_after_seconds(exc, self.settings.llm_rate_limit_backoff_s)
+                if attempt >= self.settings.llm_rate_limit_retries:
+                    # Backoff budget spent — re-raise so structured() can fall
+                    # back to the next provider (or surface LLMUnavailableError).
+                    raise
+                wait_s = _retry_after_seconds(rate_error, self.settings.llm_rate_limit_backoff_s)
                 logger.warning(
-                    "provider %s rate-limited (429); backing off %.1fs then retrying (%d/%d)",
+                    "provider %s rate-limited (429%s); backing off %.1fs then retrying (%d/%d)",
                     cfg.provider.value,
+                    "" if rate_error is exc else " wrapped",
                     wait_s,
                     attempt + 1,
                     self.settings.llm_rate_limit_retries,
@@ -246,6 +333,13 @@ class LLMClient:
         latency_ms = int((time.perf_counter() - started) * 1000)
 
         usage = getattr(completion, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) or 0
+        completion_tokens = getattr(usage, "completion_tokens", 0) or 0
+        if paced:
+            # Correct the bucket by (actual - estimate) so long-run throughput
+            # tracks the real limit rather than our up-front guess.
+            self._limiter.reconcile((prompt_tokens + completion_tokens) - estimated_tokens)
+
         try:
             raw_json = completion.choices[0].message.content or ""
         except (AttributeError, IndexError):
@@ -255,8 +349,8 @@ class LLMClient:
             data=obj,
             provider=cfg.provider,
             model=cfg.model,
-            prompt_tokens=getattr(usage, "prompt_tokens", 0) or 0,
-            completion_tokens=getattr(usage, "completion_tokens", 0) or 0,
+            prompt_tokens=prompt_tokens,
+            completion_tokens=completion_tokens,
             latency_ms=latency_ms,
             is_fallback=is_fallback,
             raw_json=raw_json,
