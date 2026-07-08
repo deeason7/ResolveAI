@@ -17,10 +17,12 @@ from pydantic import BaseModel
 
 from app.services.llm_client import (
     _MAX_BACKOFF_S,
+    InstructorRetryException,
     LLMClient,
     LLMResponse,
     LLMUnavailableError,
     Provider,
+    _as_rate_limit_error,
     _estimate_prompt_tokens,
     _retry_after_seconds,
     get_llm_client,
@@ -60,6 +62,19 @@ def _rate_limit_error(retry_after: str | None = "0") -> RateLimitError:
         429, headers=headers, request=httpx.Request("POST", "https://api.groq.com")
     )
     return RateLimitError("rate limited", response=response, body=None)
+
+
+def _wrapped_instructor_exc(cause: BaseException) -> BaseException:
+    """An ``InstructorRetryException`` chaining ``cause`` -- how instructor
+    re-raises once ITS OWN retry budget inside create_with_completion is spent.
+
+    Built via ``__new__`` so the test doesn't couple to instructor's
+    version-specific constructor kwargs; only the ``__cause__`` chain matters to
+    the unwrap logic under test.
+    """
+    exc = InstructorRetryException.__new__(InstructorRetryException)
+    exc.__cause__ = cause
+    return exc
 
 
 class _FlakyCompletions:
@@ -320,3 +335,72 @@ class TestTpmPacing:
         short = _estimate_prompt_tokens([{"role": "user", "content": "hi"}])
         long = _estimate_prompt_tokens([{"role": "user", "content": "hi" * 100}])
         assert long > short
+
+
+class TestUnwrapRateLimit:
+    """`_as_rate_limit_error` recovers a 429 whether bare or instructor-wrapped."""
+
+    def test_returns_bare_rate_limit_error(self):
+        err = _rate_limit_error("1")
+        assert _as_rate_limit_error(err) is err
+
+    def test_unwraps_instructor_wrapped_429(self):
+        inner = _rate_limit_error("1")
+        assert _as_rate_limit_error(_wrapped_instructor_exc(inner)) is inner
+
+    def test_returns_none_when_no_rate_limit_in_chain(self):
+        assert _as_rate_limit_error(_wrapped_instructor_exc(ValueError("bad"))) is None
+        assert _as_rate_limit_error(httpx.ConnectError("down")) is None
+
+
+class TestWrappedRateLimitBackoff:
+    """A burst 429 reaches us wrapped in InstructorRetryException; the client must
+    still back off and retry the SAME provider rather than fail-close to fallback.
+    """
+
+    def test_wrapped_429_retries_same_provider_then_succeeds(self):
+        flaky = _FlakyClient(
+            exc=_wrapped_instructor_exc(_rate_limit_error("0")),
+            result=(_Dummy(x=7), _completion(3, 1)),
+            fail_times=1,
+        )
+        c = _client_with(ollama=flaky, groq_key="")
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.data.x == 7
+        assert resp.provider == Provider.OLLAMA
+        assert resp.is_fallback is False
+        assert len(flaky.chat.completions.calls) == 2  # 1 wrapped-429 + 1 success
+
+    def test_wrapped_429_honors_inner_retry_after(self, monkeypatch):
+        slept: list[float] = []
+        monkeypatch.setattr("app.services.llm_client.time.sleep", lambda s: slept.append(s))
+        flaky = _FlakyClient(
+            exc=_wrapped_instructor_exc(_rate_limit_error("2.5")),
+            result=(_Dummy(x=1), _completion()),
+            fail_times=1,
+        )
+        c = _client_with(ollama=flaky, groq_key="")
+        c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert slept == [2.5]
+
+    def test_wrapped_429_exhausting_budget_falls_back(self):
+        always = _FakeClient(exc=_wrapped_instructor_exc(_rate_limit_error("0")))
+        good = _FakeClient(result=(_Dummy(x=9), _completion(4, 2)))
+        c = LLMClient(settings=_settings(groq_key="gk", rate_limit_retries=1))
+        c._clients[Provider.OLLAMA] = always
+        c._clients[Provider.GROQ] = good
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.provider == Provider.GROQ
+        assert resp.is_fallback is True
+        assert len(always.chat.completions.calls) == 2  # 1 initial + 1 retry
+
+    def test_wrapped_non_rate_limit_does_not_retry_same_provider(self):
+        # instructor exhausting its VALIDATION retries is a real failure for this
+        # provider -- fail-fast to the next one, no same-provider backoff loop.
+        bad = _FakeClient(exc=_wrapped_instructor_exc(ValueError("unparseable")))
+        good = _FakeClient(result=(_Dummy(x=3), _completion(4, 2)))
+        c = _client_with(ollama=bad, groq=good, groq_key="gk")
+        resp = c.structured(_Dummy, [{"role": "user", "content": "hi"}])
+        assert resp.provider == Provider.GROQ
+        assert resp.is_fallback is True
+        assert len(bad.chat.completions.calls) == 1  # no retry loop
