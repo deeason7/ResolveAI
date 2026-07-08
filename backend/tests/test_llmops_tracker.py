@@ -14,6 +14,10 @@ class TestEstimateCost:
         # 1M input + 1M output at (0.59, 0.79) per Mtok.
         assert estimate_cost_usd("llama-3.3-70b-versatile", 1_000_000, 1_000_000) == 1.38
 
+    def test_gpt_oss_120b_priced(self):
+        # openai/gpt-oss-120b — the current cloud model — at (0.15, 0.60) per Mtok.
+        assert estimate_cost_usd("openai/gpt-oss-120b", 1_000_000, 1_000_000) == 0.75
+
     def test_unknown_model_is_free(self):
         assert estimate_cost_usd("mystery-model", 1000, 1000) == 0.0
 
