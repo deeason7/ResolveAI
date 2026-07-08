@@ -66,6 +66,30 @@ def _retry_after_seconds(exc: RateLimitError, default: float) -> float:
     return max(0.0, min(wait, _MAX_BACKOFF_S))
 
 
+def _as_rate_limit_error(exc: BaseException) -> RateLimitError | None:
+    """Recover the ``RateLimitError`` behind a 429, unwrapping instructor if needed.
+
+    A bare ``RateLimitError`` is returned as-is. But instructor runs its own
+    retry loop *inside* ``create_with_completion``; when a burst 429 outlives
+    that budget it re-raises ``InstructorRetryException`` with the original 429
+    chained underneath. Left unexamined that reads as a generic provider failure
+    and we fail-close to the fallback chain -- so we walk the ``__cause__`` /
+    ``__context__`` chain to tell "wait and retry this provider" (a rate limit)
+    apart from "this provider is broken" (anything else). Returns ``None`` when
+    no 429 is in the chain, i.e. the caller should move on to the next provider.
+    """
+    current: BaseException | None = exc
+    # Cause chains are short; the bound is just a guard against a cyclic chain.
+    for _ in range(10):
+        if isinstance(current, RateLimitError):
+            return current
+        nxt = current.__cause__ or current.__context__
+        if nxt is None:
+            break
+        current = nxt
+    return None
+
+
 # --- Proactive TPM pacing (cloud free tiers meter tokens/min, not requests) ---
 # A pre-call token estimate: ~4 chars/token is the usual English ballpark, plus
 # a flat completion allowance we can't know until the response. reconcile()
@@ -283,15 +307,23 @@ class LLMClient:
                     temperature=temperature,
                 )
                 break
-            except RateLimitError as exc:
-                if attempt >= self.settings.llm_rate_limit_retries:
-                    # Budget exhausted — re-raise so structured() can fall back
-                    # to the next provider (or surface LLMUnavailableError).
+            except (RateLimitError, InstructorRetryException) as exc:
+                # A 429 can arrive bare, or wrapped by instructor's own retry
+                # loop once its budget is spent. Unwrap to find out which -- a
+                # non-429 (e.g. exhausted validation retries) means this provider
+                # genuinely failed, so re-raise and let structured() move on.
+                rate_error = _as_rate_limit_error(exc)
+                if rate_error is None:
                     raise
-                wait_s = _retry_after_seconds(exc, self.settings.llm_rate_limit_backoff_s)
+                if attempt >= self.settings.llm_rate_limit_retries:
+                    # Backoff budget spent — re-raise so structured() can fall
+                    # back to the next provider (or surface LLMUnavailableError).
+                    raise
+                wait_s = _retry_after_seconds(rate_error, self.settings.llm_rate_limit_backoff_s)
                 logger.warning(
-                    "provider %s rate-limited (429); backing off %.1fs then retrying (%d/%d)",
+                    "provider %s rate-limited (429%s); backing off %.1fs then retrying (%d/%d)",
                     cfg.provider.value,
+                    "" if rate_error is exc else " wrapped",
                     wait_s,
                     attempt + 1,
                     self.settings.llm_rate_limit_retries,
