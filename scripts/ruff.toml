@@ -1,0 +1,13 @@
+# Same lint standard as backend/pyproject.toml — one style across the repo.
+# Without a config here, ruff resolves settings from wherever it was invoked:
+# run from backend/ these files are fine, run from the repo root they'd be
+# reformatted to 88 columns. Pinning it makes the result independent of cwd.
+line-length = 100
+target-version = "py311"
+
+[lint]
+select = ["E", "F", "I", "UP", "B", "C4", "PIE"]
+ignore = ["E501"]
+
+[format]
+quote-style = "double"

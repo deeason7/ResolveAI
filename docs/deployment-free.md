@@ -200,6 +200,41 @@ A merge conflict fails the run loudly instead of guessing; it will be
 `README.md`, where the front-matter lives. Fix it locally, push `deploy`, and
 re-run the workflow from the Actions tab.
 
+## Backups
+
+Free tiers can be reclaimed, so the question is what's actually irreplaceable. Most of the
+database isn't: complaints come from the CFPB's public bulk download, and both the vector store
+and the graph are *derived* from that table — `populate_vector_db.py` and `seed_graph.py` rebuild
+them from scratch. What can't be regenerated is the state the app produced: accounts, the drafts
+the agent wrote, the LLM call log behind the observability dashboard, and the audit trail.
+
+On this deployment that's a few hundred rows against 30K complaints, so the backup is small:
+
+```bash
+python scripts/backup_state.py                      # -> backups/<utc stamp>/, one JSONL per table
+python scripts/backup_state.py --include-complaints # + the corpus, if you'd rather not re-ingest
+```
+
+`backups/` is gitignored — an export contains real email addresses and password hashes, so treat
+it like the `.env` files.
+
+Restoring is idempotent; rows whose primary key already exists are skipped, so it never
+duplicates and never clobbers something newer:
+
+```bash
+python scripts/backup_state.py --restore backups/20260820T142647-0500
+```
+
+The manifest records the alembic revision the rows were written against, and a restore into a
+database on a different revision refuses rather than proceeding — that mismatch is the usual way
+a backup turns into a corruption. `--force` overrides it once you've checked the schemas agree.
+
+Full recovery order after losing an instance: `alembic upgrade head` → re-ingest the corpus
+(section 3) → `--restore` the app state → rebuild Qdrant and the graph.
+
+Deliberately not `pg_dump`: the managed Postgres is v18, which would pin every machine that ever
+takes a backup to a v18 client. This goes through the same engine the app already uses.
+
 ## Limits to know
 
 - **Neon 0.5 GB** caps the corpus at ~30K rows — that's the `SEED_ROWS` default
