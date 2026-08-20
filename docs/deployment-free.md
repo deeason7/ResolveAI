@@ -76,7 +76,13 @@ restarts independently). To deploy:
 1. **Create a Space** → SDK **Docker**, hardware **CPU basic** (free).
 2. **Give it the code.** Add the Space as a git remote and push the `deploy`
    branch to it (the Space builds from its own repo root, which is why the
-   `Dockerfile` lives at the repo root).
+   `Dockerfile` lives at the repo root):
+   ```bash
+   git remote add space https://huggingface.co/spaces/<user>/<space>
+   git push --force space deploy:main
+   ```
+   Only the first push is manual — after that, releases ship themselves
+   (see *Releasing* below).
 3. **Add the front-matter.** HF needs a YAML header at the top of `README.md` on
    the branch it builds. Prepend this on `deploy`:
    ```yaml
@@ -170,6 +176,29 @@ Open the Streamlit URL and **Try the demo** (or register). Then:
 
 If a page errors with "API unreachable", the `API_URL` secret is wrong or the
 Space is still cold-starting (give it a minute on first hit).
+
+## Releasing
+
+`deploy` is `main` plus the front-matter above — nothing else. Pushing a version
+tag hands the rest to CI (`.github/workflows/deploy.yml`):
+
+```bash
+git checkout main && git merge --no-ff develop
+git tag -a v1.4.0 -m "..." && git push origin main --tags
+```
+
+The workflow re-runs lint, tests and the image build, refuses to ship a tag that
+isn't on `main`, merges the tagged commit into `deploy`, and force-pushes
+`deploy` to the Space's `main` to trigger a rebuild. Merging to `main` on its own
+deploys nothing; the tag is the commitment.
+
+It needs one secret, `HF_TOKEN` — a Hugging Face token with **write** access to
+the Space, under *Settings → Secrets and variables → Actions*. Without it the
+job fails at the last step rather than half-deploying.
+
+A merge conflict fails the run loudly instead of guessing; it will be
+`README.md`, where the front-matter lives. Fix it locally, push `deploy`, and
+re-run the workflow from the Actions tab.
 
 ## Limits to know
 
