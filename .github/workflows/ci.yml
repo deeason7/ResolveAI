@@ -20,7 +20,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v10
+      # Pinned exact: setup-uv stopped publishing floating major tags after v7,
+      # so @v10 doesn't resolve. Exact pins are the safer choice for a
+      # third-party action anyway — a floating tag can be moved under you.
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - name: Install backend with dev tools
         working-directory: backend
