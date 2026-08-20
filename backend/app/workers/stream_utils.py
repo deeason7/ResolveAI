@@ -16,7 +16,26 @@ from collections.abc import Awaitable, Callable
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
 
+from app.config import settings
+
 logger = logging.getLogger(__name__)
+
+
+def trim_kwargs() -> dict:
+    """MAXLEN arguments for a producer's XADD, or nothing when trimming is off.
+
+    XACK removes an entry from the pending list but leaves it in the stream, so
+    an uncapped stream grows for the life of the deployment. ``approximate``
+    lets Redis trim on node boundaries, which is what makes a capped XADD cost
+    roughly the same as an uncapped one.
+
+    The cap must stay well above any plausible in-flight backlog: trimming
+    evicts entries even while a consumer still holds them pending, and a PEL row
+    pointing at a message that no longer exists can never be reclaimed.
+    """
+    maxlen = settings.stream_maxlen
+    return {"maxlen": maxlen, "approximate": True} if maxlen else {}
+
 
 # Reclaim one page per call; the run loop invokes this each cycle, so a large
 # orphan backlog drains over successive ticks instead of blocking one iteration.
