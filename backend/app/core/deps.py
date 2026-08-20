@@ -8,7 +8,6 @@ FastAPI injects it automatically — the route itself never touches JWT logic.
 """
 
 import logging
-import uuid
 from functools import lru_cache
 
 import redis.asyncio as aioredis
@@ -17,7 +16,7 @@ from fastapi.security import HTTPAuthorizationCredentials, HTTPBearer
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.core.security import decode_access_token
+from app.core.security import decode_access_token, token_subject
 from app.database import get_session
 from app.models.user import User, UserRole
 from app.services.graph_store import GraphStore, get_default_graph_store
@@ -52,7 +51,15 @@ async def get_current_user(
             headers={"WWW-Authenticate": "Bearer"},
         )
 
-    user = await session.get(User, uuid.UUID(payload["sub"]))
+    subject = token_subject(payload)
+    if subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or expired token",
+            headers={"WWW-Authenticate": "Bearer"},
+        )
+
+    user = await session.get(User, subject)
     if user is None:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     if not user.is_active:
