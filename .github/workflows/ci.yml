@@ -14,13 +14,13 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      - uses: astral-sh/setup-uv@v10
 
       - name: Install backend with dev tools
         working-directory: backend
@@ -42,7 +42,7 @@ jobs:
     # Catches Dockerfile rot without booting the stack.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Provide an env file (compose validates its presence)
         run: cp .env.example .env
       - name: Build images
