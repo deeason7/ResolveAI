@@ -192,7 +192,7 @@ instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
 
 ```bash
 cd backend
-python -m pytest tests/ -v          # 506 tests, SQLite + fakes, no services needed
+python -m pytest tests/ -v          # 524 tests, SQLite + fakes, no services needed
 python -m ruff check . ../frontend  # zero-warning policy, frontend included
 python -m ruff format --check . ../frontend
 pre-commit install                  # ruff + format on every commit
