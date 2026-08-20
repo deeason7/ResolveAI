@@ -74,11 +74,23 @@ _LEGAL_ADVICE = re.compile(
     r"|\bsue the\b",
     re.IGNORECASE,
 )
+# Qualifiers slot between the verb and the noun in real drafts ("admits full
+# legal liability"), and "responsibility" is the word a model reaches for at
+# least as often as "liability" — the original patterns required the noun to
+# follow the verb immediately and never listed it, so both walked straight
+# through. Over-matching is the safe direction here: a false positive costs one
+# regeneration, a false negative ships a legal admission.
+_LIABILITY_QUALIFIER = (
+    r"(?:full|fully|complete|completely|total|totally|partial|partially"
+    r"|legal|legally|sole|solely|wholly|any|all)\s+"
+)
 _LIABILITY_ADMISSION = re.compile(
-    r"\b(?:the company|we|they) (?:is|are|was|were) (?:legally )?"
-    r"(?:liable|at fault|guilty|negligent)\b"
-    r"|\badmits? (?:fault|liability|guilt)\b"
-    r"|\baccepts? (?:full )?liability\b",
+    r"\b(?:the company|the bank|we|they) (?:is|are|was|were) "
+    rf"(?:{_LIABILITY_QUALIFIER})*(?:legally\s+)?"
+    r"(?:liable|at fault|guilty|negligent|responsible for)\b"
+    rf"|\b(?:admits?|admitting|accepts?|accepting|assumes?|assuming)\s+"
+    rf"(?:{_LIABILITY_QUALIFIER})*"
+    r"(?:fault|liability|guilt|responsibility|blame)\b",
     re.IGNORECASE,
 )
 _DISCRIMINATORY = re.compile(

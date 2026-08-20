@@ -170,6 +170,38 @@ class TestContentSafetyLayer:
         out = guardrails.validate_content_safety(f"{GOOD_TEXT} {phrase}")
         assert expected_code in _codes(out)
 
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            # Qualifiers between verb and noun — the original pattern required
+            # them to be adjacent, so every one of these shipped clean.
+            "The bank admits full legal liability for the duplicate charge.",
+            "We admit complete fault for the error on your account.",
+            "The company accepts full responsibility for the delay.",
+            "We accept responsibility for every resulting fee.",
+            "They assume all liability for the mishandled dispute.",
+            "The bank is fully responsible for the incorrect reporting.",
+            "We are legally responsible for the damage to your credit.",
+        ],
+    )
+    def test_qualified_admissions_flagged(self, phrase):
+        """Regression: 'admits liability' was caught, 'admits full liability' wasn't."""
+        out = guardrails.validate_content_safety(f"{GOOD_TEXT} {phrase}")
+        assert "liability_admission" in _codes(out)
+
+    @pytest.mark.parametrize(
+        "phrase",
+        [
+            # The broadened pattern must not swallow ordinary process language.
+            "It is your responsibility to submit the notice within 60 days.",
+            "The representative responsible for your case will follow up.",
+            "We take your concerns seriously and are reviewing the account.",
+        ],
+    )
+    def test_ordinary_process_language_not_flagged(self, phrase):
+        out = guardrails.validate_content_safety(f"{GOOD_TEXT} {phrase}")
+        assert "liability_admission" not in _codes(out)
+
     def test_violation_message_quotes_the_phrase(self):
         out = guardrails.validate_content_safety("You should sue the company.")
         assert "You should sue" in out[0].message
