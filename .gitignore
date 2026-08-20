@@ -94,6 +94,9 @@ fine_tuning/results/
 secrets/
 .streamlit/secrets.toml
 
+# Backups — these hold real user rows (emails, password hashes, audit trail)
+backups/
+
 # Logs
 *.log
 logs/

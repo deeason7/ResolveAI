@@ -29,11 +29,11 @@ jobs:
         working-directory: backend
         run: uv sync --extra dev
 
-      - name: Lint (backend + frontend, zero-warning policy)
+      - name: Lint (backend + frontend + scripts, zero-warning policy)
         working-directory: backend
         run: |
-          uv run ruff check . ../frontend
-          uv run ruff format --check . ../frontend
+          uv run ruff check . ../frontend ../scripts
+          uv run ruff format --check . ../frontend ../scripts
 
       - name: Tests
         working-directory: backend
