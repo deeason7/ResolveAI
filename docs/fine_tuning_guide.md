@@ -80,6 +80,20 @@ API): 100% parseable, 89% sentiment accuracy, urgency MAE 0.25 —
    python fine_tuning/06_smoke_test.py --batch 100
    ```
 
+## Measuring it at scale
+
+Two scripts sit outside the seven-step pipeline. Neither trains anything —
+they exist to answer "does this hold up on real volume?", which the held-out
+eval above can't, and they're where the numbers quoted elsewhere come from.
+
+| Script | What it measures |
+|---|---|
+| `colab_live_classify.py` | Serves the exported GGUF through Ollama on a Colab GPU and classifies a large real batch — **8,000 CFPB complaints, 100% valid strict JSON**, p50 1.14s / p95 1.68s. The point is throughput and parse-rate at a volume a laptop can't reach; the 32K-context KV cache starves batching, so treat throughput as a config artifact rather than a ceiling. |
+| `agent_benchmark.py` | Runs the **real** `ResolutionAgent` and the four-layer `GuardrailEngine` in-process (stub vector/graph stores, real seed regulations, recording guardrails) and reports pass rates, auto-correction counts, judge tone scores, cost and latency per resolution. Token-paced so a free-tier LLM budget doesn't distort the run. |
+
+Both write JSON into `fine_tuning/results/` (gitignored — they're run
+artifacts, not source).
+
 ## Gotchas that cost real time (so you don't pay twice)
 
 - **`assistant_only_loss` is the whole ballgame** — see step 3 above.

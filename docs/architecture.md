@@ -70,8 +70,9 @@ writes the resolution + final status + N LLM log rows atomically.
 ## Classification routing and failure policy
 
 1. **Local first** — the fine-tuned Qwen2.5-3B via Ollama (free, private).
-2. **Cloud fallback** — Groq Llama 3.3 70B when local is unavailable or
-   skipped (`LLM_SKIP_LOCAL`).
+2. **Cloud fallback** — Groq `openai/gpt-oss-120b` when local is unavailable
+   or skipped (`LLM_SKIP_LOCAL`). The model is a config default, so a
+   redeploy is how it moves when Groq retires one.
 3. **Fail closed** — if nothing answers, a deterministic fallback labels the
    complaint `extreme_negative` / urgency 5 / `escalated`. When the system
    is blind it demands human eyes; it never guesses politely.
@@ -144,7 +145,7 @@ can't drift from it.
 
 ## Testing strategy
 
-397 tests across 21 files, running in ~15s with **no services**: SQLite
+506 tests across 27 files, running in ~20s with **no services**: SQLite
 (via `aiosqlite`) plus injected fakes at the same seams production uses —
 the vector store, graph store, LLM client and Redis are all
 constructor/dependency-injected. External providers are never called in
