@@ -53,7 +53,7 @@ def create_app() -> FastAPI:
     app = FastAPI(
         title="ResolveAI",
         description="Intelligent Complaint Resolution Engine",
-        version="0.1.0",
+        version="1.3.0",
         docs_url="/api/docs",
         redoc_url="/api/redoc",
         openapi_url="/api/openapi.json",
