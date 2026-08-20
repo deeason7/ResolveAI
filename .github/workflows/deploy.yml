@@ -1,0 +1,70 @@
+# Ships a tagged release to the Hugging Face Space.
+#
+# Tagging is the deliberate act here: merging to main stays cheap and
+# reversible, pushing a v* tag is the commitment. The Space builds from its own
+# `main`, and our `deploy` branch is main *plus* the YAML front-matter HF needs
+# at the top of README.md — so a release has to be merged into `deploy` rather
+# than shoved straight across, or the Space loses its build config.
+name: deploy
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+concurrency:
+  # Two runs force-pushing the same Space would race. Queue, don't cancel —
+  # a half-finished deploy is worse than a slow one.
+  group: space-deploy
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    # The same lint + tests + image build every branch gets. The docker-build
+    # job earns its keep here: the Space builds this exact root Dockerfile, so
+    # catching rot now beats catching it in prod four minutes later.
+    uses: ./.github/workflows/ci.yml
+
+  deploy:
+    needs: verify
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # pushes the merge commit back to origin/deploy
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # merging needs real history; a shallow clone can't
+
+      - name: Check the release is actually on main
+        run: |
+          git fetch --no-tags origin main
+          if ! git merge-base --is-ancestor "$GITHUB_SHA" origin/main; then
+            echo "::error::$GITHUB_SHA is not an ancestor of origin/main. Release tags must point at a commit that has been merged to main."
+            exit 1
+          fi
+
+      - name: Merge the release into deploy
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git fetch --no-tags origin deploy
+          git checkout -B deploy origin/deploy
+          if ! git merge --no-ff "$GITHUB_SHA" -m "Merge: ${GITHUB_REF_NAME} into deploy"; then
+            echo "::error::Merge conflict against deploy — almost certainly README.md, where the HF front-matter lives. Resolve it locally, push deploy, then re-run this workflow."
+            exit 1
+          fi
+
+      - name: Push deploy to origin
+        run: git push origin deploy
+
+      - name: Push deploy to the Space
+        env:
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+        run: |
+          if [ -z "$HF_TOKEN" ]; then
+            echo "::error::HF_TOKEN is not set. Add a write-scoped Hugging Face token under Settings → Secrets and variables → Actions."
+            exit 1
+          fi
+          # Force is deliberate: the Space's git history is derived, not
+          # authoritative — `deploy` is the source of truth for what it runs.
+          git push --force "https://user:${HF_TOKEN}@huggingface.co/spaces/Deeason/resolveai" deploy:main
