@@ -65,7 +65,7 @@ from app.services.guardrails import GuardrailEngine
 from app.services.llm_client import LLMClient, get_llm_client
 from app.services.llmops_tracker import LLMOpsTracker
 from app.services.vector_store import VectorStore, get_default_store
-from app.workers.stream_utils import reclaim_stale_messages
+from app.workers.stream_utils import reclaim_stale_messages, trim_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -118,7 +118,7 @@ async def enqueue_resolution(
     fields: dict[str, str] = {"complaint_id": str(complaint_id)}
     if feedback:
         fields["feedback"] = feedback
-    return await redis_client.xadd(stream, fields)
+    return await redis_client.xadd(stream, fields, **trim_kwargs())
 
 
 class ResolutionWorker:

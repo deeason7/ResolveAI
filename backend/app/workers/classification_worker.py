@@ -45,7 +45,7 @@ from app.services.graph_store import GraphStore, get_default_graph_store
 from app.services.llmops_tracker import LLMOpsTracker
 from app.services.vector_store import VectorStore, get_default_store
 from app.workers.resolution_worker import enqueue_resolution
-from app.workers.stream_utils import reclaim_stale_messages
+from app.workers.stream_utils import reclaim_stale_messages, trim_kwargs
 
 logger = logging.getLogger(__name__)
 
@@ -80,7 +80,7 @@ async def enqueue_complaint(
     one definition of the message shape instead of hand-rolling XADD calls.
     """
     stream = stream or default_settings.classification_queue
-    return await redis_client.xadd(stream, {"complaint_id": str(complaint_id)})
+    return await redis_client.xadd(stream, {"complaint_id": str(complaint_id)}, **trim_kwargs())
 
 
 class ClassificationWorker:
