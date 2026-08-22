@@ -8,6 +8,22 @@ this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.htm
 Releases are cut from `main`; pushing a `v*` tag runs the full lint/test/image
 gate and ships the tagged commit to the hosted demo.
 
+## [1.4.1] — 2026-08-21
+
+### Fixed
+
+- **Rate limits and audit-log IPs now identify the caller, not the proxy.**
+  uvicorn only honours `X-Forwarded-For` when the immediate peer is trusted,
+  and that defaults to `127.0.0.1` alone — so behind the hosted platform's
+  ingress every caller collapsed into a single identity. The rate limiter keyed
+  on the proxy, which made the 20/min limit on the credential endpoints a
+  shared bucket rather than per-client protection, and `audit_logs.ip_hash`
+  recorded the ingress node instead of the client. The image now trusts a
+  private-range peer, which is the only thing that can open a connection to it.
+  Deliberately a CIDR and not `*`: uvicorn walks the forwarded chain in reverse
+  to the first untrusted hop, but `*` short-circuits to the end a caller can
+  inject. Three tests pin that distinction.
+
 ## [1.4.0] — 2026-08-21
 
 Security and operability. No new user-facing surface — this release closes two
@@ -208,6 +224,7 @@ First complete release. All six build phases delivered.
 - Sentence-transformer embedding service and Qdrant vector store, with a 200K
   embedding backfill.
 
+[1.4.1]: https://github.com/deeason7/ResolveAI/compare/v1.4.0...v1.4.1
 [1.4.0]: https://github.com/deeason7/ResolveAI/compare/v1.3.0...v1.4.0
 [1.3.0]: https://github.com/deeason7/ResolveAI/compare/v1.2.2...v1.3.0
 [1.2.2]: https://github.com/deeason7/ResolveAI/compare/v1.2.1...v1.2.2
