@@ -17,7 +17,7 @@ bulk import additionally requires the `admin` role.
 | POST | `/register` | 201 + access token | Sets refresh cookie |
 | POST | `/login` | 200 + access token | Sets refresh cookie |
 | POST | `/refresh` | 200 + new access token | Rotates the refresh cookie |
-| POST | `/logout` | 200 | Revokes the refresh token (Redis blocklist) |
+| POST | `/logout` | 204 | Revokes the refresh token (Redis blocklist) |
 | GET | `/me` | 200 user profile | |
 
 ## Complaints — `/complaints`
@@ -84,3 +84,8 @@ bulk import additionally requires the `admin` role.
 - **202 means async**: generate/reject queue work for the resolution
   worker — poll the resolution endpoints or watch the dashboard.
 - Validation errors are FastAPI-standard 422s with field-level detail.
+- **Rate limits**: 200/min globally, tightened to 20/min on `/auth/login` and
+  `/auth/register` (each attempt costs a bcrypt verify) and 10/min on the
+  workspace enqueue routes. Over the line is a 429.
+- **Login is deliberately uninformative**: an unknown address and a wrong
+  password return the same 401, and take the same time to do it.

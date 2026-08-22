@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "resolveai-backend"
-version = "0.1.0"
+version = "1.4.0"
 description = "Intelligent Complaint Resolution Engine — backend API"
 requires-python = ">=3.11"
 
@@ -15,6 +15,13 @@ dependencies = [
 
     # ORM + migrations
     "sqlmodel>=0.0.22,<1.0",
+    # We drive SQLAlchemy's async engine, which runs on greenlet. SQLAlchemy
+    # only pulls greenlet in via a platform_machine marker listing aarch64 /
+    # x86_64 / amd64 / win32 — Apple Silicon reports "arm64" and matches none
+    # of them, so a fresh install on a Mac resolves without it and every async
+    # DB call dies with "the greenlet library is required". Declaring the
+    # asyncio extra states the actual requirement and is platform-independent.
+    "sqlalchemy[asyncio]>=2.0,<3.0",
     "alembic>=1.13,<2.0",
     "asyncpg>=0.29,<1.0",          # async PostgreSQL driver
 

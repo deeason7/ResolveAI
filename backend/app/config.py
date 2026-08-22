@@ -45,6 +45,13 @@ class Settings(BaseSettings):
     # defaults keep the local stack's snappy 5s, every-cycle loop.
     worker_block_ms: int = 5000
     worker_reclaim_every: int = Field(default=1, ge=1)  # PEL sweep every Nth cycle
+    # XACK clears an entry from the pending list, not from the stream — so a
+    # stream with no cap grows for as long as the deployment lives. Capping the
+    # length on XADD keeps memory bounded on a metered Redis. The bound has to
+    # sit far above any plausible in-flight backlog: trimming evicts entries
+    # even when a consumer still has them pending, which would strand phantom
+    # PEL rows pointing at messages that no longer exist. 0 disables trimming.
+    stream_maxlen: int = Field(default=10000, ge=0)
 
     # Qdrant
     qdrant_host: str = "qdrant"

@@ -1,6 +1,6 @@
 # ResolveAI — Intelligent Complaint Resolution Engine
 
-> 🔗 **Live demo → https://resolveaideeason.streamlit.app/** — the full pipeline running on free, no-credit-card infrastructure ($0/mo). First load may take ~30–60s while the free Space wakes from idle.
+> 🔗 **Live demo → https://resolveaideeason.streamlit.app/** — the full pipeline running on free, no-credit-card infrastructure ($0/mo), over a 30K slice of the corpus that fits the free storage tiers. First load may take ~30–60s while the free Space wakes from idle.
 
 A full-stack system that triages real consumer financial complaints, drafts
 regulation-aware responses with an agent, validates every draft through a
@@ -30,7 +30,7 @@ flowchart LR
     A[Complaint intake] --> Q[Redis Stream]
     Q --> W[Classification worker]
     W -->|local first| SLM[Fine-tuned SLM via Ollama]
-    W -->|cloud fallback| GROQ[Groq Llama 3.3 70B]
+    W -->|cloud fallback| GROQ[Groq gpt-oss-120b]
     W -->|nothing answers| FC[Fail closed: max severity, escalate to human]
     W --> PG[(PostgreSQL)]
     W --> VDB[(Qdrant embeddings)]
@@ -192,7 +192,7 @@ instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
 
 ```bash
 cd backend
-python -m pytest tests/ -v          # 397 tests, SQLite + fakes, no services needed
+python -m pytest tests/ -v          # 540 tests, SQLite + fakes, no services needed
 python -m ruff check . ../frontend  # zero-warning policy, frontend included
 python -m ruff format --check . ../frontend
 pre-commit install                  # ruff + format on every commit
@@ -200,7 +200,10 @@ pre-commit install                  # ruff + format on every commit
 
 Tests mock external services at injection seams (the vector store, graph
 store, LLM client and Redis are all constructor/dependency-injected), so the
-suite runs in ~15 seconds with no containers.
+suite runs in ~25 seconds with no containers.
+
+Release history is in [`CHANGELOG.md`](CHANGELOG.md). Releases are cut from
+`main`; a `v*` tag runs the full gate and ships to the hosted demo.
 
 ## Project layout
 
@@ -215,7 +218,7 @@ backend/
                      # llm client, agent/ (tools, prompts, orchestrator)
     workers/         # Redis Streams consumers (classification, resolution)
   alembic/           # migrations
-  tests/             # 21 test files
+  tests/             # 29 test files
 frontend/            # Streamlit app: pages/, api_client, auth, tour,
                      # engineering_notes, theme
 fine_tuning/         # label engineering → QLoRA training → eval → GGUF export

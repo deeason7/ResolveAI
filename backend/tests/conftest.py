@@ -33,13 +33,22 @@ from httpx import ASGITransport, AsyncClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
-from unittest.mock import patch
 
 _fake_redis_server = fakeredis.FakeServer()
 
 
 def _make_fake_redis(*args, **kwargs):
     return fakeredis.aioredis.FakeRedis(server=_fake_redis_server, decode_responses=True)
+
+
+@pytest.fixture()
+def fake_redis():
+    """The same in-memory Redis the app's get_redis override hands out.
+
+    All fakes share one FakeServer, so state written here is visible to the
+    routes — which is what lets a test seed a key the endpoint should react to.
+    """
+    return _make_fake_redis()
 
 
 @pytest.fixture(autouse=True)
@@ -87,14 +96,13 @@ async def client():
 
     test_app = create_app()
     test_app.dependency_overrides[get_session] = override_session
-    # Routes that produce to streams (complaint submit, resolution trigger) get
-    # the same shared-server fakeredis the auth blocklist patch uses. Zero-arg
+    # Every Redis caller — stream producers and the auth refresh blocklist —
+    # comes through this one seam now. Zero-arg
     # lambda on purpose: FastAPI introspects the override's signature, and a
     # (*args, **kwargs) factory would become two required query params.
     test_app.dependency_overrides[get_redis] = lambda: _make_fake_redis()
 
-    with patch("app.api.routes.auth.aioredis.from_url", side_effect=_make_fake_redis):
-        async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
-            yield ac
+    async with AsyncClient(transport=ASGITransport(app=test_app), base_url="http://test") as ac:
+        yield ac
     # Do NOT dispose the module-level engine — it's reused across tests.
     # The next test's setup wipes the schema via drop_all/create_all.
