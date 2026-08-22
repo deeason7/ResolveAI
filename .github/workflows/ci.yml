@@ -7,6 +7,8 @@ on:
   push:
     branches: [main, develop]
   pull_request:
+  # deploy.yml calls this before it ships a tag — same gate, one definition.
+  workflow_call:
 
 jobs:
   lint-and-test:
