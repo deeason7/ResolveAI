@@ -18,16 +18,19 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.core.deps import get_current_user
+from app.core.deps import get_current_user, get_redis
 from app.core.security import (
     create_access_token,
     create_refresh_token,
     decode_refresh_token,
     hash_ip,
     hash_password,
-    verify_password,
+    hash_token,
+    token_subject,
+    verify_password_or_dummy,
 )
 from app.database import get_session
+from app.middleware.rate_limit import limiter
 from app.models.audit_log import AuditLog
 from app.models.user import User
 from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserPublic
@@ -38,9 +41,36 @@ router = APIRouter(prefix="/auth", tags=["auth"])
 REFRESH_COOKIE = "refresh_token"
 REFRESH_BLOCKLIST_PREFIX = "blocklist:refresh:"
 
+# Credential endpoints are the expensive ones: every attempt costs a bcrypt
+# verify (~180ms of CPU), so the global 200/min default is really a licence to
+# saturate a small box. Note this keys on the peer address, which behind a
+# managed proxy is the proxy — so treat it as a cost ceiling for the endpoint
+# rather than true per-client fairness.
+_CREDENTIAL_RATE_LIMIT = "20/minute"
 
-def _redis() -> aioredis.Redis:
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
+
+def _blocklist_key(token: str) -> str:
+    return f"{REFRESH_BLOCKLIST_PREFIX}{hash_token(token)}"
+
+
+async def _is_revoked(r: aioredis.Redis, token: str) -> bool:
+    """True if this refresh token has been revoked.
+
+    Checks the legacy raw-token key as well: entries written before the switch
+    to hashed keys are still live for up to the refresh TTL, and a revoked token
+    silently becoming valid again is the one outcome worth a second lookup.
+    """
+    if await r.exists(_blocklist_key(token)):
+        return True
+    return bool(await r.exists(f"{REFRESH_BLOCKLIST_PREFIX}{token}"))
+
+
+async def _revoke(r: aioredis.Redis, token: str) -> None:
+    await r.setex(
+        _blocklist_key(token),
+        settings.refresh_token_expire_days * 86400,
+        "revoked",
+    )
 
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
@@ -68,6 +98,7 @@ async def _audit(session: AsyncSession, request: Request, user_id: "uuid.UUID", 
 
 
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
+@limiter.limit(_CREDENTIAL_RATE_LIMIT)
 async def register(
     body: RegisterRequest,
     request: Request,
@@ -101,6 +132,7 @@ async def register(
 
 
 @router.post("/login", response_model=TokenResponse)
+@limiter.limit(_CREDENTIAL_RATE_LIMIT)
 async def login(
     body: LoginRequest,
     request: Request,
@@ -111,8 +143,11 @@ async def login(
     result = await session.exec(select(User).where(User.email == body.email))
     user = result.first()
 
-    # Constant-time comparison to prevent user-enumeration timing attacks
-    if user is None or not verify_password(body.password, user.hashed_password):
+    # Always pay for a bcrypt verify, even with no user to verify against —
+    # `user is None or not verify_password(...)` would short-circuit, and the
+    # ~180ms gap between "no such email" and "wrong password" is a readable
+    # account-enumeration oracle over the network.
+    if not verify_password_or_dummy(body.password, user.hashed_password if user else None):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
@@ -134,6 +169,7 @@ async def login(
 async def refresh(
     response: Response,
     session: AsyncSession = Depends(get_session),
+    r: aioredis.Redis = Depends(get_redis),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
 ) -> TokenResponse:
     """Issue a new access token using the refresh cookie."""
@@ -146,11 +182,16 @@ async def refresh(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
         )
 
-    async with _redis() as r:
-        if await r.exists(f"{REFRESH_BLOCKLIST_PREFIX}{refresh_token}"):
-            raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
+    if await _is_revoked(r, refresh_token):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
 
-    user = await session.get(User, uuid.UUID(payload["sub"]))
+    subject = token_subject(payload)
+    if subject is None:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
+        )
+
+    user = await session.get(User, subject)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
 
@@ -158,12 +199,7 @@ async def refresh(
     new_refresh = create_refresh_token(str(user.id))
 
     # Rotate: revoke old, issue new
-    async with _redis() as r:
-        await r.setex(
-            f"{REFRESH_BLOCKLIST_PREFIX}{refresh_token}",
-            settings.refresh_token_expire_days * 86400,
-            "revoked",
-        )
+    await _revoke(r, refresh_token)
     _set_refresh_cookie(response, new_refresh)
 
     return TokenResponse(access_token=new_access)
@@ -178,16 +214,12 @@ async def logout(
     response: Response,
     session: AsyncSession = Depends(get_session),
     current_user: User = Depends(get_current_user),
+    r: aioredis.Redis = Depends(get_redis),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
 ) -> None:
     """Revoke the refresh token and clear the cookie."""
     if refresh_token:
-        async with _redis() as r:
-            await r.setex(
-                f"{REFRESH_BLOCKLIST_PREFIX}{refresh_token}",
-                settings.refresh_token_expire_days * 86400,
-                "revoked",
-            )
+        await _revoke(r, refresh_token)
 
     response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth")
     await _audit(session, request, current_user.id, "logout")

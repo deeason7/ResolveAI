@@ -41,12 +41,11 @@ else:
     if _local.exists():
         sys.path.insert(0, str(_local))
 
-from sqlmodel import select  # noqa: E402  (after sys.path bootstrap above)
-
 from app.database import AsyncSessionLocal  # noqa: E402
 from app.models.complaint import Complaint  # noqa: E402
 from app.services.embedder import embed_batch  # noqa: E402
 from app.services.vector_store import ComplaintPoint, get_default_store  # noqa: E402
+from sqlmodel import select  # noqa: E402  (after sys.path bootstrap above)
 
 logging.basicConfig(
     level=logging.INFO,

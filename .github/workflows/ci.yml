@@ -14,23 +14,26 @@ jobs:
   lint-and-test:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
 
-      - uses: actions/setup-python@v5
+      - uses: actions/setup-python@v7
         with:
           python-version: "3.11"
 
-      - uses: astral-sh/setup-uv@v5
+      # Pinned exact: setup-uv stopped publishing floating major tags after v7,
+      # so @v10 doesn't resolve. Exact pins are the safer choice for a
+      # third-party action anyway — a floating tag can be moved under you.
+      - uses: astral-sh/setup-uv@v10.0.1
 
       - name: Install backend with dev tools
         working-directory: backend
         run: uv sync --extra dev
 
-      - name: Lint (backend + frontend, zero-warning policy)
+      - name: Lint (backend + frontend + scripts, zero-warning policy)
         working-directory: backend
         run: |
-          uv run ruff check . ../frontend
-          uv run ruff format --check . ../frontend
+          uv run ruff check . ../frontend ../scripts
+          uv run ruff format --check . ../frontend ../scripts
 
       - name: Tests
         working-directory: backend
@@ -42,7 +45,7 @@ jobs:
     # Catches Dockerfile rot without booting the stack.
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v7
       - name: Provide an env file (compose validates its presence)
         run: cp .env.example .env
       - name: Build images
