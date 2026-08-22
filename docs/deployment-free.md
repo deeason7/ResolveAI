@@ -245,3 +245,31 @@ takes a backup to a v18 client. This goes through the same engine the app alread
   drop `WORKER_BLOCK_MS` back to the dev default on this deployment.
 - **HF idle pause** means the first visit after a quiet spell is slow while the
   Space wakes.
+
+### Inactivity clocks — the ones that delete things
+
+Idle pauses are recoverable. Two of these tiers eventually delete instead, so a
+deployment you stop visiting does not just go to sleep:
+
+| service | idle behaviour | point of no return |
+|---|---|---|
+| Hugging Face Space | sleeps after ~48 h | — wakes on visit |
+| Neon | compute suspends after 5 min | — auto-resumes on connect |
+| Upstash Redis | — | **archived after 30 d idle** (data backed up first) |
+| Neo4j Aura Free | pauses after ~3 d | **deleted 30 d after pausing** |
+| Qdrant Cloud Free | suspended after 7 d | **deleted after 28 d** |
+
+**Qdrant is the one to plan for.** Losing it costs every embedding and breaks
+both similar-complaint lookup and the agent's precedent search. It is derived
+state, so recovery is a rebuild rather than a restore:
+
+```bash
+python scripts/populate_vector_db.py    # re-embeds from Postgres
+```
+
+A scheduled job that touches each backend daily keeps all of these clocks reset.
+Reaching Postgres and Neo4j takes an authenticated request; reaching the vector
+store takes one that runs a search — `GET /complaints/{id}/similar` returns 503
+when the vector store is unreachable, which makes it usable as an assertion
+rather than a liveness echo. `GET /health` deliberately touches no datastore, so
+it cannot stand in for any of them.
