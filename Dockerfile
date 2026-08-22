@@ -10,9 +10,26 @@ FROM python:3.11-slim
 
 # HF routes external traffic to app_port (declared in the README front-matter);
 # 7860 is its default. uvicorn binds the same port via supervisord.
+# FORWARDED_ALLOW_IPS: uvicorn always wraps ProxyHeadersMiddleware
+# (proxy_headers defaults True) but only honours X-Forwarded-For when the
+# immediate peer is trusted, and that defaults to 127.0.0.1 alone. HF's ingress
+# is not localhost, so without this every client collapsed into one identity:
+# the rate limiter keyed on the proxy (measured live -- 10.16.23.249 and two
+# siblings), making the 20/min credential cap a shared bucket rather than
+# per-client, and audit_logs.ip_hash recorded the ingress node instead of the
+# user. Only HF's own infrastructure can open a connection to this container,
+# so trusting a private-range peer is safe here.
+#
+# The CIDR form matters. uvicorn's get_trusted_client_address walks the
+# forwarded chain in REVERSE and returns the first untrusted hop, so a header
+# a client injects sits to the left of what the proxy appended and is skipped.
+# Setting this to "*" would take the opposite path -- always_trust short
+# circuits to hosts[0], the client-controlled end -- and hand any caller the
+# ability to choose their own rate-limit bucket. Do not "simplify" it to *.
 ENV PORT=7860 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
+    FORWARDED_ALLOW_IPS=10.0.0.0/8 \
     HF_HOME=/home/appuser/.cache/huggingface
 
 WORKDIR /app
