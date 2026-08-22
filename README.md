@@ -192,7 +192,7 @@ instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
 
 ```bash
 cd backend
-python -m pytest tests/ -v          # 540 tests, SQLite + fakes, no services needed
+python -m pytest tests/ -v          # 543 tests, SQLite + fakes, no services needed
 python -m ruff check . ../frontend  # zero-warning policy, frontend included
 python -m ruff format --check . ../frontend
 pre-commit install                  # ruff + format on every commit
@@ -218,7 +218,7 @@ backend/
                      # llm client, agent/ (tools, prompts, orchestrator)
     workers/         # Redis Streams consumers (classification, resolution)
   alembic/           # migrations
-  tests/             # 29 test files
+  tests/             # 30 test files
 frontend/            # Streamlit app: pages/, api_client, auth, tour,
                      # engineering_notes, theme
 fine_tuning/         # label engineering → QLoRA training → eval → GGUF export
