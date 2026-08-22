@@ -145,7 +145,7 @@ can't drift from it.
 
 ## Testing strategy
 
-524 tests across 28 files, running in ~20s with **no services**: SQLite
+540 tests across 29 files, running in ~25s with **no services**: SQLite
 (via `aiosqlite`) plus injected fakes at the same seams production uses —
 the vector store, graph store, LLM client and Redis are all
 constructor/dependency-injected. External providers are never called in

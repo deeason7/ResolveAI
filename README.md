@@ -192,7 +192,7 @@ instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
 
 ```bash
 cd backend
-python -m pytest tests/ -v          # 524 tests, SQLite + fakes, no services needed
+python -m pytest tests/ -v          # 540 tests, SQLite + fakes, no services needed
 python -m ruff check . ../frontend  # zero-warning policy, frontend included
 python -m ruff format --check . ../frontend
 pre-commit install                  # ruff + format on every commit
@@ -200,7 +200,10 @@ pre-commit install                  # ruff + format on every commit
 
 Tests mock external services at injection seams (the vector store, graph
 store, LLM client and Redis are all constructor/dependency-injected), so the
-suite runs in ~15 seconds with no containers.
+suite runs in ~25 seconds with no containers.
+
+Release history is in [`CHANGELOG.md`](CHANGELOG.md). Releases are cut from
+`main`; a `v*` tag runs the full gate and ships to the hosted demo.
 
 ## Project layout
 
@@ -215,7 +218,7 @@ backend/
                      # llm client, agent/ (tools, prompts, orchestrator)
     workers/         # Redis Streams consumers (classification, resolution)
   alembic/           # migrations
-  tests/             # 21 test files
+  tests/             # 29 test files
 frontend/            # Streamlit app: pages/, api_client, auth, tour,
                      # engineering_notes, theme
 fine_tuning/         # label engineering → QLoRA training → eval → GGUF export
