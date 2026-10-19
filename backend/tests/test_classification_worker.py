@@ -18,7 +18,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.llm_log import LLMLog
 from app.schemas.classification import ComplaintClassification
 from app.services.classifier import ClassificationOutcome
@@ -72,11 +72,11 @@ def _outcome(*, sentiment="negative", urgency=3, succeeded=True, is_fallback=Fal
         reasoning="model reasoning text here",
     )
     return ClassificationOutcome(
-        classification=cls,
-        provider="ollama" if succeeded else "none",
+        classification=cls if succeeded else None,
+        provider=("groq" if is_fallback else "ollama") if succeeded else "none",
         model="resolveai-sentiment" if succeeded else "none",
-        prompt_tokens=10,
-        completion_tokens=5,
+        prompt_tokens=10 if succeeded else None,
+        completion_tokens=5 if succeeded else None,
         latency_ms=100,
         is_fallback=is_fallback,
         succeeded=succeeded,
@@ -141,11 +141,121 @@ class TestProcessMessage:
             assert c.sentiment == "negative"
             assert c.urgency == 3
             assert c.priority_score is not None
+            assert c.classification_outcome == ClassificationState.succeeded
+            assert c.classification_source == "ollama"
+            assert c.classification_stale is False
+            assert c.classified_at is not None
             logs = (await s.exec(select(LLMLog))).all()
             assert len(logs) == 1
             assert logs[0].operation == "classify"
             assert logs[0].cost_usd == 0.0
         assert vector_store.collection_count() == 1
+
+    async def test_outage_needs_triage_without_labels_or_downstream_work(
+        self, redis_client, factory, vector_store
+    ):
+        cid = await _seed(factory)
+        graph_store = AsyncMock()
+        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False), graph_store)
+        await w.process_message({"complaint_id": str(cid)})
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.needs_review
+            assert c.classification_outcome == ClassificationState.unavailable
+            assert c.sentiment is c.intent is c.urgency is c.priority_score is None
+            assert c.classification_source is None
+            assert c.classification_stale is False
+            assert c.classification_error == "providers_unavailable"
+            assert c.classification_latency_ms == 100
+            assert c.classification_attempted_at is not None
+            assert c.classified_at is None
+            log = (await s.exec(select(LLMLog))).one()
+            assert log.operation == "classify_unavailable"
+            assert log.latency_ms == 100
+            assert log.prompt_tokens is log.completion_tokens is log.cost_usd is None
+        assert vector_store.collection_count() == 0
+        assert await redis_client.xlen(w.settings.resolution_queue) == 0
+        graph_store.upsert_complaint_entities.assert_not_awaited()
+
+    async def test_failed_reclassification_retains_labels_and_provenance(
+        self, redis_client, factory, vector_store
+    ):
+        cid = await _seed(
+            factory,
+            status=ComplaintStatus.classified,
+            sentiment="neutral",
+            intent="information_request",
+            urgency=1,
+            priority_score=0.0,
+            classification_outcome=ClassificationState.succeeded,
+            classification_source="groq",
+            classification_was_fallback=True,
+        )
+        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
+        await w.process_message({"complaint_id": str(cid)})
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.classified
+            assert (c.sentiment, c.intent, c.urgency, c.priority_score) == (
+                "neutral",
+                "information_request",
+                1,
+                0.0,
+            )
+            assert c.classification_outcome == ClassificationState.unavailable
+            assert c.classification_source == "groq"
+            assert c.classification_was_fallback is True
+            assert c.classification_stale is True
+        assert vector_store.collection_count() == 0
+
+    @pytest.mark.parametrize("manual", [False, True])
+    async def test_replay_preserves_resolved_or_manual_case(
+        self, redis_client, factory, vector_store, manual
+    ):
+        cid = await _seed(
+            factory,
+            status=ComplaintStatus.classified if manual else ComplaintStatus.resolved,
+            sentiment="neutral",
+            intent="information_request",
+            urgency=1,
+            classification_source="manual" if manual else "ollama",
+            classification_outcome=ClassificationState.manual
+            if manual
+            else ClassificationState.succeeded,
+        )
+        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
+        await w.process_message({"complaint_id": str(cid)})
+        assert w.classifier.calls == []
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.urgency == 1
+            assert c.classification_outcome == (
+                ClassificationState.manual if manual else ClassificationState.succeeded
+            )
+
+    async def test_decision_during_inference_is_not_overwritten(
+        self, redis_client, factory, vector_store, monkeypatch
+    ):
+        cid = await _seed(factory)
+        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
+
+        async def change_case_then_return(*args, **kwargs):
+            async with factory() as s:
+                c = await s.get(Complaint, cid)
+                c.status = ComplaintStatus.resolved
+                c.sentiment = "neutral"
+                s.add(c)
+                await s.commit()
+            return _outcome(succeeded=False)
+
+        monkeypatch.setattr(cw.asyncio, "to_thread", change_case_then_return)
+        await w.process_message({"complaint_id": str(cid)})
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.status == ComplaintStatus.resolved
+            assert c.sentiment == "neutral"
+            assert c.classification_outcome == ClassificationState.pending
+            assert (await s.exec(select(LLMLog))).all() == []
 
     async def test_high_priority_escalates(self, redis_client, factory, vector_store):
         cid = await _seed(factory)
@@ -154,6 +264,19 @@ class TestProcessMessage:
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.escalated
+
+    async def test_successful_fallback_persists_provider_provenance(
+        self, redis_client, factory, vector_store
+    ):
+        cid = await _seed(factory)
+        w = _worker(redis_client, factory, vector_store, _outcome(is_fallback=True))
+        await w.process_message({"complaint_id": str(cid)})
+        async with factory() as s:
+            c = await s.get(Complaint, cid)
+            assert c.classification_outcome == ClassificationState.succeeded
+            assert c.classification_source == "groq"
+            assert c.classification_was_fallback is True
+            assert c.classification_error is None
 
     async def test_missing_complaint_is_poison(self, redis_client, factory, vector_store):
         w = _worker(redis_client, factory, vector_store, _outcome())

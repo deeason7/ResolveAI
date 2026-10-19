@@ -22,6 +22,24 @@ post-deployment smoke gates remain separate work.
   PostgreSQL snapshot. Restore verifies checksums/schema and requires an empty
   target; conflicts roll back the operation. Legacy partial archives are rejected.
 
+- Database inserts now default to viewer through a forward migration that leaves
+  existing roles unchanged.
+- Refresh tokens have unique IDs and atomic single-use rotation; credential resets
+  invalidate refresh sessions. Legacy sessions require sign-in again.
+- Bcrypt inputs reject more than 72 UTF-8 bytes; hashing and verification run off
+  the async event loop. Account throttles and bounded Redis failures fail closed.
+- Production Streamlit requests use private verified HTTPS through Caddy; frontend
+  authentication failures clear partial state and provide bounded errors.
+
+### Classification
+
+- Persisted classification outcomes distinguish pending, success, unavailable,
+  manual and unknown legacy provenance. Total provider failure invents no labels.
+- Failed reclassification retains prior labels as stale. New outages enter human
+  review without automatic drafting; generation/regeneration reject stale inputs.
+- Queue/detail/workspace views expose outage state and unknown urgency. Manual
+  editing and durable retry workflows remain separate unfinished work.
+
 ### Verification and documentation
 
 - Added guarded PostgreSQL migration, integrity, concurrency and restore tests,

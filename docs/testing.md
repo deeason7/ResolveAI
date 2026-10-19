@@ -65,7 +65,10 @@ or `pg_sessionmaker` explicitly in PostgreSQL tests and mark them `postgres`.
 Coverage includes an empty migration chain, a linked-data upgrade from a previous
 revision, foreign-key and unique-constraint rejection, two independent database
 connections racing at a synchronization barrier, and visibility before/after
-commit. The uniqueness race establishes the database backstop; it does not claim
+commit. The migration tests check raw SQL viewer defaults and legacy classification
+provenance. Classification tests persist real outage state and synchronize a human
+commit during inference; recovery includes the new metadata. The uniqueness race
+establishes the database backstop; it does not claim
 that every API currently handles that conflict correctly.
 
 Stop only the disposable container created above when finished:

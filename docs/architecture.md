@@ -1,8 +1,8 @@
 # Architecture
 
 This describes the implementation and its known limits. The initial review was
-2026-10-17; access control, PostgreSQL verification and backup handling were revised
-on 2026-10-18. Proposed queue/review changes are not existing guarantees.
+2026-10-17; access control, classification outcomes, sessions, PostgreSQL verification
+and backup handling were revised on 2026-10-18. Proposed queue/review changes are not existing guarantees.
 
 ## Runtime topology
 
@@ -43,7 +43,7 @@ sequenceDiagram
     API->>PG: Dependency commits transaction
     API-->>U: Complaint ID
     R->>W: Read or reclaim message
-    W->>L: Classify outside database transaction
+    W->>L: Classify without holding a row lock
     W->>PG: Persist classification and telemetry
     W->>R: Acknowledge message
 ```
@@ -62,11 +62,24 @@ result and logs in another. The database lock does not span model inference.
 ## Classification and drafting
 
 The classifier uses an installed local model unless local inference is skipped;
-otherwise the configured cloud provider is used. On provider failure, the reviewed
-classifier returns a deterministic negative/dispute-resolution/urgency-3 result
-with `provider="none"` and `succeeded=false`. The worker can store it as a normal
-classification. This is not a maximum-severity escalation or reliable manual-review
-state. Treat that row as unavailable model output, not a prediction.
+otherwise the configured cloud provider is used. When every provider fails, the
+classifier returns no labels. The worker persists an independent classification
+outcome (`pending`, `succeeded`, `unavailable`, `manual`, or `legacy_unknown`) plus
+source, staleness, attempt time, elapsed latency, and safe error category. Existing
+rows receive unknown provenance during migration; their labels remain unchanged.
+
+A new unavailable case moves to `needs_review` with null urgency/priority. Failed
+reclassification retains prior labels/source, marks them stale and preserves its
+existing lifecycle. Neither path starts drafting or updates derived indexes.
+Generation and regeneration reject unavailable/stale inputs. Successful fallback
+records the actual provider and fallback flag. Task latency includes all attempts.
+
+The worker skips terminal/manual-source cases and checks its original snapshot
+again under a short row lock before writing. This is a limited stale-write guard,
+not durable job leasing or complete input/version fencing. In-flight resolution
+workers still need that protection. The UI exposes a Needs triage filter and
+provenance notices; manual label editing and controlled retries remain unfinished.
+See [classification rollout](classification.md) for cutover and rollback limits.
 
 The resolution agent uses a bounded flow: gather context, draft, validate,
 regenerate with feedback, then return a draft or escalate after the retry limit.
@@ -102,7 +115,18 @@ the API directly. Database role checks, not hidden controls, must authorize writ
 Public registration is disabled by default outside development/test; when enabled
 it creates viewers. The configured demo identity is rejected if it is privileged.
 Staff provisioning is an explicit administrative operation; see [access](access.md).
-Token rotation and transport findings remain separate from role enforcement.
+Refresh tokens carry random session IDs and a credential fingerprint. One atomic
+Redis SET NX consumes each token until its original expiry. Password changes
+invalidate existing refresh credentials; issued access tokens remain valid until
+expiry unless the account is disabled. Legacy refresh tokens require a new login.
+Production Compose routes Streamlit requests through Caddy's private HTTPS listener
+so Secure cookies work with verified TLS; no public API route is added.
+
+Bcrypt inputs are bounded at 72 UTF-8 bytes for hashing and verification. Async
+handlers offload bcrypt work and enforce an account ceiling in addition to the
+endpoint ceiling. Redis uncertainty fails authentication closed. The existing
+aggregate limiter still uses synchronous Redis I/O with bounded socket timeouts;
+this remains a performance limit during a slow Redis response.
 
 Wire contracts use Pydantic schemas separately from SQLModel rows. Queue endpoints
 filter/order/page in SQL and send narrative previews; detail endpoints load the
@@ -114,7 +138,10 @@ these need workload measurements and query limits before scale claims.
 
 Workers persist model/provider/token/latency/cost fields with some business writes.
 This is not a complete provider-call ledger: failed attempts, historical labels,
-unknown pricing and zero-duration fallback records limit interpretation. Recorded
+unknown pricing and historical zero-duration fallback records limit interpretation.
+New classification outages use `classify_unavailable`, elapsed task latency and
+null usage/cost, so they do not count as successful classifications in drift
+sampling. Some aggregate cost endpoints still coalesce unknown cost to zero. Recorded
 cost is an estimate for logged calls, not the cost of the corpus or total operation.
 
 The 2026-10-17 baseline verification at commit `0e75774` passed 543 backend tests

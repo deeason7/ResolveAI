@@ -70,7 +70,9 @@ def _response(cls=None, provider=Provider.OLLAMA, is_fallback=False) -> LLMRespo
 
 
 class TestClassify:
-    def test_success_maps_all_fields(self):
+    def test_success_maps_all_fields(self, monkeypatch):
+        clock = iter([100.0, 101.5])
+        monkeypatch.setattr(clf.time, "perf_counter", lambda: next(clock))
         client = _FakeLLMClient(response=_response(_classification(urgency=4)))
         outcome = Classifier(client=client).classify("I was charged twice")
         assert outcome.succeeded is True
@@ -78,21 +80,36 @@ class TestClassify:
         assert outcome.model == "resolveai-sentiment"
         assert outcome.prompt_tokens == 12
         assert outcome.completion_tokens == 8
-        assert outcome.latency_ms == 321
+        assert outcome.latency_ms == 1500
         assert outcome.is_fallback is False
         assert outcome.classification.urgency == 4
 
-    def test_fallback_when_all_providers_down(self):
-        client = _FakeLLMClient(exc=LLMUnavailableError("everything down"))
+    def test_unavailable_has_no_invented_classification(self, monkeypatch, caplog):
+        clock = iter([100.0, 101.234])
+        monkeypatch.setattr(clf.time, "perf_counter", lambda: next(clock))
+        client = _FakeLLMClient(exc=LLMUnavailableError("private provider response"))
         outcome = Classifier(client=client).classify("urgent help needed")
         assert outcome.succeeded is False
         assert outcome.provider == "none"
         assert outcome.model == "none"
-        assert outcome.prompt_tokens == 0
-        assert outcome.classification.sentiment == "negative"
-        assert outcome.classification.urgency == 3
-        assert outcome.classification.key_entities == []
-        assert "review" in outcome.classification.reasoning.lower()
+        assert outcome.prompt_tokens is None
+        assert outcome.completion_tokens is None
+        assert outcome.classification is None
+        assert outcome.latency_ms == 1234
+        assert outcome.error_category == "providers_unavailable"
+        assert "private provider response" not in caplog.text
+
+    def test_cloud_fallback_is_still_a_success(self, monkeypatch):
+        clock = iter([100.0, 103.5])
+        monkeypatch.setattr(clf.time, "perf_counter", lambda: next(clock))
+        client = _FakeLLMClient(response=_response(provider=Provider.GROQ, is_fallback=True))
+        outcome = Classifier(client=client).classify("a complaint")
+        assert outcome.succeeded is True
+        assert outcome.provider == "groq"
+        assert outcome.is_fallback is True
+        assert outcome.latency_ms == 3500  # whole attempt, not the winner's 321 ms
+        assert outcome.error_category is None
+        assert outcome.classification is not None
 
     def test_sends_system_and_user_messages(self):
         client = _FakeLLMClient(response=_response())

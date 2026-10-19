@@ -106,24 +106,25 @@ class TestTokenSubject:
 
 class TestBlocklistKeys:
     def test_token_is_hashed_not_stored_raw(self):
-        token = create_refresh_token("00000000-0000-0000-0000-000000000001")
+        token = create_refresh_token("00000000-0000-0000-0000-000000000001", "synthetic-hash")
         assert token not in hash_token(token)
         assert len(hash_token(token)) == 64
 
-    async def test_legacy_raw_key_still_revokes(self, client: AsyncClient, fake_redis):
-        """Entries written before hashed keys stay honored until they expire."""
-        from app.api.routes.auth import REFRESH_BLOCKLIST_PREFIX
+    async def test_legacy_refresh_requires_relogin(self, client: AsyncClient):
+        """No compatibility path may accept old tokens without a unique identity."""
+        import time
 
-        reg = await client.post(REGISTER_URL, json={**USER, "email": "legacy@example.com"})
-        token = reg.cookies["refresh_token"]
-
-        await fake_redis.setex(f"{REFRESH_BLOCKLIST_PREFIX}{token}", 60, "revoked")
-
-        # The cookie is issued Secure (ENVIRONMENT != development), so the test
-        # transport won't replay it over http — hand it over explicitly.
+        token = jwt.encode(
+            {
+                "sub": "00000000-0000-0000-0000-000000000001",
+                "type": "refresh",
+                "exp": int(time.time()) + 60,
+            },
+            settings.jwt_refresh_secret_key,
+            algorithm=settings.jwt_algorithm,
+        )
         resp = await client.post(REFRESH_URL, headers={"Cookie": f"refresh_token={token}"})
         assert resp.status_code == 401
-        assert resp.json()["detail"] == "Token revoked"
 
     async def test_hashed_key_revokes(self, client: AsyncClient, fake_redis):
         """The key the code writes today must also be honored on read."""
@@ -154,9 +155,8 @@ class TestCredentialRateLimit:
         from app.api.routes.auth import _CREDENTIAL_RATE_LIMIT
 
         allowed = int(_CREDENTIAL_RATE_LIMIT.split("/")[0])
-        body = {"email": "nobody@example.com", "password": "securepassword123"}
-
-        for _ in range(allowed):
-            assert (await client.post(LOGIN_URL, json=body)).status_code == 401
-
-        assert (await client.post(LOGIN_URL, json=body)).status_code == 429
+        with patch("app.api.routes.auth.verify_password_or_dummy", return_value=False):
+            for number in range(allowed):
+                body = {"email": f"nobody{number}@example.com", "password": "securepassword123"}
+                assert (await client.post(LOGIN_URL, json=body)).status_code == 401
+            assert (await client.post(LOGIN_URL, json=body)).status_code == 429

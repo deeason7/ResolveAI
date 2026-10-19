@@ -47,6 +47,7 @@ def render_login_page() -> None:
     with signin_tab, st.form("signin"):
         email = st.text_input("Email")
         password = st.text_input("Password", type="password")
+        st.caption("If you cannot sign in, contact an administrator for a password reset.")
         if st.form_submit_button("Sign in", type="primary", use_container_width=True):
             try:
                 api_client.login(email, password)
@@ -62,7 +63,8 @@ def render_login_page() -> None:
         st.caption("Self-service accounts can view cases. Staff access is provisioned separately.")
         full_name = st.text_input("Full name")
         email = st.text_input("Email", key="reg_email")
-        password = st.text_input("Password (min 8 chars)", type="password", key="reg_password")
+        password = st.text_input("Password (min 8 characters)", type="password", key="reg_password")
+        st.caption("Passwords must fit within 72 UTF-8 bytes; some characters use multiple bytes.")
         if st.form_submit_button("Create account", use_container_width=True):
             try:
                 api_client.register(email, full_name, password)

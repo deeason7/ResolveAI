@@ -201,7 +201,7 @@ class TestProvisionedRoles:
         assert (
             await client.get(ME_URL, headers={"Authorization": f"Bearer {token}"})
         ).status_code == 403
-        refresh = create_refresh_token(str(demo.id))
+        refresh = create_refresh_token(str(demo.id), demo.hashed_password)
         assert (
             await client.post(REFRESH_URL, headers={"Cookie": f"refresh_token={refresh}"})
         ).status_code == 403

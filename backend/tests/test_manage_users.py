@@ -192,6 +192,130 @@ async def test_new_password_boundaries_fail_without_echoing_secret(client):
         assert (await session.exec(select(User))).all() == []
 
 
+async def test_reset_dry_run_does_not_read_credentials_or_change_accounts(client):
+    selected = await _seed()
+    async with AsyncSessionLocal() as session, session.begin():
+        result = await manage.reset_password(
+            session,
+            user_id=selected,
+            expected_email="staff@example.com",
+            reason="Synthetic recovery drill",
+            password_reader=lambda: pytest.fail("Dry run must not read password"),
+        )
+        assert result["action"] == "would_reset_password"
+        assert (await session.get(User, selected)).hashed_password == "synthetic-hash"
+        assert (await session.exec(select(AuditLog))).all() == []
+
+
+async def test_reset_requires_matching_exact_account_and_safe_new_password(client):
+    selected = await _seed()
+    async with AsyncSessionLocal() as session, session.begin():
+        with pytest.raises(ValueError, match="do not match"):
+            await manage.reset_password(
+                session,
+                user_id=selected,
+                expected_email="wrong@example.com",
+                reason="Synthetic recovery drill",
+                apply=True,
+                password_reader=lambda: pytest.fail("Must check selector first"),
+            )
+        invalid = "é" * 37
+        with pytest.raises(ValueError, match="72 UTF-8 bytes") as error:
+            await manage.reset_password(
+                session,
+                user_id=selected,
+                expected_email="staff@example.com",
+                reason="Synthetic recovery drill",
+                apply=True,
+                password_reader=lambda: invalid,
+            )
+        assert invalid not in str(error.value)
+        assert (await session.get(User, selected)).hashed_password == "synthetic-hash"
+
+
+async def test_reset_recovers_legacy_truncation_and_invalidates_refresh_sessions(client):
+    from app.core.security import create_access_token, create_refresh_token, verify_password
+
+    # Simulate a legacy bcrypt 4.x account created from an overlong password.
+    # Hashing its first 72 bytes is exactly the historical truncation behavior.
+    old_password = "a" * 72 + "legacy-suffix"
+    async with AsyncSessionLocal() as session, session.begin():
+        user = User(
+            email="legacy@example.com",
+            full_name="Legacy",
+            role=UserRole.viewer,
+            hashed_password=manage.bcrypt.hashpw(
+                old_password[:72].encode(), manage.bcrypt.gensalt()
+            ).decode(),
+        )
+        session.add(user)
+        await session.flush()
+        selected = user.id
+        previous_refresh = create_refresh_token(str(user.id), user.hashed_password)
+        previous_access = create_access_token(str(user.id), user.role.value)
+    unrelated = await _seed(email="unrelated@example.com")
+    assert (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "legacy@example.com", "password": old_password}
+        )
+    ).status_code == 422
+    async with AsyncSessionLocal() as session, session.begin():
+        report = await manage.reset_password(
+            session,
+            user_id=selected,
+            expected_email="legacy@example.com",
+            reason="Confirmed account recovery; synthetic test",
+            apply=True,
+            password_reader=lambda: PASSWORD,
+        )
+        assert report["action"] == "password_reset"
+        changed = await session.get(User, selected)
+        assert verify_password(PASSWORD, changed.hashed_password)
+        assert PASSWORD not in json.dumps(report)
+        assert changed.hashed_password not in json.dumps(report)
+        assert (await session.get(User, unrelated)).hashed_password == "synthetic-hash"
+        events = (await session.exec(select(AuditLog))).all()
+        assert len(events) == 1
+        assert events[0].event == "account_password_reset"
+    response = await client.post(
+        "/api/v1/auth/refresh", headers={"Cookie": f"refresh_token={previous_refresh}"}
+    )
+    assert response.status_code == 401
+    # Deliberate bounded residual: already-issued access tokens last until expiry.
+    profile = await client.get(
+        "/api/v1/auth/me", headers={"Authorization": f"Bearer {previous_access}"}
+    )
+    assert profile.status_code == 200
+    assert (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "legacy@example.com", "password": PASSWORD}
+        )
+    ).status_code == 200
+    assert (
+        await client.post(
+            "/api/v1/auth/login", json={"email": "legacy@example.com", "password": "a" * 72}
+        )
+    ).status_code == 401
+
+
+def test_reset_cli_requires_confirmed_selector_and_defaults_dry_run():
+    args = manage.parser().parse_args(
+        [
+            "--database-url-env",
+            "SYNTHETIC_TARGET",
+            "reset-password",
+            "--user-id",
+            "00000000-0000-0000-0000-000000000001",
+            "--expected-email",
+            "legacy@example.com",
+            "--reason",
+            "Synthetic drill",
+        ]
+    )
+    assert args.apply is False
+    assert args.password_env is None
+
+
 def test_cli_requires_explicit_database_selection(monkeypatch, capsys):
     monkeypatch.setenv("DATABASE_URL", "not-used")
     monkeypatch.delenv("MISSING_ADMIN_TARGET", raising=False)

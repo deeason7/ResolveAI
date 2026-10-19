@@ -20,7 +20,7 @@ from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.user import UserRole
 
 BOARD_URL = "/api/v1/workspace/board"
@@ -97,10 +97,35 @@ async def test_board_counts_by_status(factory, fake_redis):
     assert body["resolved"] == 1
     assert body["agent_triggered"] == 0
     assert body["total"] == 11
+    assert body["classification_unavailable"] == 0
     # Stream telemetry is present and zeroed — no worker/groups in the fake.
     assert body["classification_stream"]["name"] == settings.classification_queue
     assert body["classification_stream"]["in_flight"] == 0
     assert body["resolution_stream"]["name"] == settings.resolution_queue
+
+
+@pytest.mark.asyncio
+async def test_board_counts_unavailable_separately_from_lifecycle(factory, fake_redis):
+    async with factory() as s:
+        for case_status in (
+            ComplaintStatus.needs_review,
+            ComplaintStatus.classified,
+            ComplaintStatus.resolved,
+        ):
+            s.add(
+                Complaint(
+                    narrative="synthetic unavailable case",
+                    status=case_status,
+                    classification_outcome=ClassificationState.unavailable,
+                )
+            )
+        await s.commit()
+    async with _client(_build_app(factory, fake_redis)) as ac:
+        response = await ac.get(BOARD_URL)
+    data = response.json()
+    assert data["total"] == 3
+    assert data["classification_unavailable"] == 2
+    assert data["needs_review"] == data["classified"] == data["resolved"] == 1
 
 
 @pytest.mark.asyncio
@@ -137,6 +162,31 @@ async def test_enqueue_resolution_flips_escalated(factory, fake_redis):
         statuses = [v.value for v in (await s.exec(select(Complaint.status))).all()]
     assert statuses.count(ComplaintStatus.agent_triggered.value) == 2
     assert statuses.count(ComplaintStatus.classified.value) == 5
+
+
+@pytest.mark.asyncio
+async def test_batch_resolution_does_not_draft_stale_or_unavailable_labels(factory, fake_redis):
+    async with factory() as s:
+        s.add(
+            Complaint(
+                narrative="retained labels after provider outage",
+                status=ComplaintStatus.escalated,
+                classification_outcome=ClassificationState.unavailable,
+            )
+        )
+        s.add(
+            Complaint(
+                narrative="stale verified labels",
+                status=ComplaintStatus.escalated,
+                classification_stale=True,
+            )
+        )
+        await s.commit()
+    async with _client(_build_app(factory, fake_redis)) as ac:
+        response = await ac.post(RESOLVE_URL)
+    assert response.status_code == 200
+    assert response.json()["enqueued"] == 0
+    assert await fake_redis.xlen(settings.resolution_queue) == 0
 
 
 @pytest.mark.asyncio

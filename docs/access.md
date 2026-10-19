@@ -90,7 +90,58 @@ public production demo, provision or explicitly remediate the demo viewer, and
 verify read access plus denied writes. Source tests do not establish current hosted
 account state.
 
-The refresh-token rotation, password-verification byte boundary, and production
-HTTP/Secure-cookie transport findings are separate outstanding fixes. New accounts
-created by the administrative command reject bcrypt passwords over 72 UTF-8 bytes;
-that does not claim the existing public registration/login paths are repaired yet.
+Refresh tokens now contain unique IDs and a fingerprint of the current credential.
+Rotation consumes one token atomically in Redis and retains its spent marker only
+until its original expiry. Concurrent refresh attempts have one winner; separate
+logins remain independent. Logout revokes the presented refresh token even after
+access expiry. It does not revoke every token in a session family.
+
+This release deliberately rejects old refresh tokens without the new claims.
+Users must sign in again when their access token expires. Password reset also
+invalidates prior refresh credentials. Already-issued access tokens remain valid
+until their configured expiry (30 minutes by default), unless the account is
+disabled. Do not represent logout/reset as immediate global access revocation.
+
+Redis must retain spent-token markers until expiry. Configure persistence and a
+no-eviction policy with monitored capacity. Production Compose enables AOF with
+appendfsync=always and noeviction; this costs write latency and still needs a
+persistent volume and capacity monitoring. Verify hosted Redis retention separately.
+See [Redis persistence trade-offs](https://redis.io/docs/latest/operate/oss_and_stack/management/persistence/).
+Redis data loss can permit replay of
+still-valid tokens; after loss, rotate the refresh signing secret and require new
+logins. A volume alone does not establish that every acknowledged write is durable.
+Network/storage failures return 503 without issuing replacement credentials.
+
+Production frontend requests require verified HTTPS. The Compose frontend uses
+Caddy's private port 8443 with the public domain certificate; 8443 is not published.
+Hosted frontends must set ENVIRONMENT=production and an HTTPS API_URL. See
+[deployment](deployment.md) for certificate and routing verification.
+
+## Password recovery
+
+Registration and verification enforce the bcrypt limit of 72 UTF-8 bytes, not 72
+characters. Over-limit login attempts are rejected before hashing or comparison;
+validation responses omit submitted values. A legacy hash cannot reveal whether
+its original input was longer. Do not guess affected accounts or suggest that
+users sign in with a truncated prefix. Direct them to an administrator for reset.
+
+After verifying the person's identity and selecting the account from inventory,
+preview a reset:
+
+```sh
+backend/.venv/bin/python scripts/manage_users.py --database-url-env ADMIN_DATABASE_URL reset-password --user-id SELECTED_UUID --expected-email selected@example.com --reason "Verified account recovery"
+```
+
+The default dry run neither reads a new password nor changes the account. Add
+--apply after reviewing the exact ID/email match; a hidden prompt requests the new
+password. Noninteractive use can select --password-env NAME. The command changes
+only that account, preserves its role, and records the reason in the same
+transaction. Never put passwords or personal recovery evidence in the reason.
+A synthetic test rehearses recovery from a legacy truncated-input hash and checks
+that other accounts stay unchanged; no real accounts have been reset.
+
+Credential routes retain a peer-address ceiling and add a shared five-attempt
+account allowance per fixed minute window. The account key is HMAC-derived, and
+unknown accounts consume the same allowance. A minute boundary permits a bounded
+burst; this is not a complete abuse-prevention system. The peer ceiling can still
+be shared by Streamlit users, and SlowAPI's Redis storage remains synchronous.

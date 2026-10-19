@@ -6,13 +6,13 @@ three things the transport must never know about:
   * the exact training-time prompt (system + user), so inference matches training
     and the fine-tuned behavior holds,
   * the :class:`ComplaintClassification` contract, and
-  * a deterministic fallback so the pipeline degrades instead of blocking when
-    every model provider is down.
+  * an explicit unavailable outcome when every model provider is down.
 """
 
 from __future__ import annotations
 
 import logging
+import time
 from dataclasses import dataclass
 
 from app.schemas.classification import ComplaintClassification
@@ -58,35 +58,19 @@ def build_user_prompt(
     return "\n".join(parts)
 
 
-def _fallback_classification() -> ComplaintClassification:
-    """Conservative default when every provider is unavailable.
-
-    Mid urgency and an explicit reasoning string so a failed call surfaces for a
-    human reviewer instead of being silently buried or wrongly escalated.
-    """
-    return ComplaintClassification(
-        sentiment="negative",
-        intent="dispute_resolution",
-        urgency=3,
-        key_entities=[],
-        reasoning=(
-            "Automated fallback: classification providers unavailable; flagged for manual review."
-        ),
-    )
-
-
 @dataclass
 class ClassificationOutcome:
     """Classifier result plus the metadata the LLMOps tracker persists."""
 
-    classification: ComplaintClassification
+    classification: ComplaintClassification | None
     provider: str  # "ollama" | "groq" | "none"
     model: str  # concrete model name — the LLMOps cost table is keyed on this
-    prompt_tokens: int
-    completion_tokens: int
+    prompt_tokens: int | None
+    completion_tokens: int | None
     latency_ms: int
     is_fallback: bool  # True only when the cloud served after a local failure
-    succeeded: bool  # False => deterministic fallback (no model output at all)
+    succeeded: bool
+    error_category: str | None = None
 
 
 class Classifier:
@@ -111,21 +95,25 @@ class Classifier:
                 "content": build_user_prompt(narrative, product, issue, company),
             },
         ]
+        started = time.perf_counter()
         try:
             resp: LLMResponse[ComplaintClassification] = self.client.structured(
                 ComplaintClassification, messages
             )
-        except LLMUnavailableError as exc:
-            logger.error("classification failed, using deterministic fallback: %s", exc)
+        except LLMUnavailableError:
+            # Provider errors can contain submitted text or credentials; persist
+            # only this stable category, never the exception body.
+            logger.warning("classification unavailable: all providers failed")
             return ClassificationOutcome(
-                classification=_fallback_classification(),
+                classification=None,
                 provider="none",
                 model="none",
-                prompt_tokens=0,
-                completion_tokens=0,
-                latency_ms=0,
+                prompt_tokens=None,
+                completion_tokens=None,
+                latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
                 is_fallback=False,
                 succeeded=False,
+                error_category="providers_unavailable",
             )
 
         return ClassificationOutcome(
@@ -134,7 +122,8 @@ class Classifier:
             model=resp.model,
             prompt_tokens=resp.prompt_tokens,
             completion_tokens=resp.completion_tokens,
-            latency_ms=resp.latency_ms,
+            # Include failed local attempts, pacing and fallback in task latency.
+            latency_ms=max(0, round((time.perf_counter() - started) * 1000)),
             is_fallback=resp.is_fallback,
             succeeded=True,
         )

@@ -37,6 +37,7 @@ class WorkspaceBoard(BaseModel):
     needs_review: int  # agent failed / unavailable — human takes over
     resolved: int  # human approved — closed
     total: int
+    classification_unavailable: int  # subset of open cases needing manual triage
     classification_stream: StreamInfo
     resolution_stream: StreamInfo
 

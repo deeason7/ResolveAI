@@ -11,12 +11,23 @@ the hashed_password field in an API response.
 import uuid
 from datetime import datetime
 
-from pydantic import BaseModel, ConfigDict, EmailStr, Field
+from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
 from app.models.user import UserRole
 
 
-class RegisterRequest(BaseModel):
+class PasswordRequest(BaseModel):
+    password: str
+
+    @field_validator("password")
+    @classmethod
+    def bcrypt_byte_boundary(cls, value: str) -> str:
+        if len(value.encode("utf-8")) > 72:
+            raise ValueError("Passwords must not exceed 72 UTF-8 bytes")
+        return value
+
+
+class RegisterRequest(PasswordRequest):
     model_config = ConfigDict(extra="forbid")
 
     email: EmailStr
@@ -24,7 +35,7 @@ class RegisterRequest(BaseModel):
     password: str = Field(min_length=8, max_length=128)
 
 
-class LoginRequest(BaseModel):
+class LoginRequest(PasswordRequest):
     email: EmailStr
     password: str
 

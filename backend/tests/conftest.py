@@ -114,6 +114,7 @@ def _reset_rate_limiter():
 @pytest_asyncio.fixture()
 async def client():
     """Per-test: reset schema, return an HTTP client."""
+    await _make_fake_redis().flushall()
     # Import models FIRST so SQLModel.metadata knows about all tables
     import app.models  # noqa: F401
     from app.database import engine, get_session

@@ -44,7 +44,7 @@ async def backup_engine(tmp_path):
 
 async def seed_rows(engine):
     from app.models.audit_log import AuditLog
-    from app.models.complaint import Complaint, ComplaintStatus
+    from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
     from app.models.complaint_label import ComplaintLabel
     from app.models.llm_log import LLMLog
     from app.models.resolution import GuardrailStatus, Resolution
@@ -64,10 +64,24 @@ async def seed_rows(engine):
             status=ComplaintStatus.resolved,
             sentiment="negative",
             urgency=5,
+            classification_outcome=ClassificationState.unavailable,
+            classification_source="manual",
+            classification_stale=True,
+            classification_attempted_at=datetime(2026, 1, 3),
+            classified_at=datetime(2026, 1, 2),
+            classification_error="providers_unavailable",
+            classification_latency_ms=1501,
+            classification_was_fallback=False,
             company="Example Bank",
             date_received=datetime(2026, 1, 2),
         )
-        live = Complaint(narrative="Synthetic live submission.", status=ComplaintStatus.classified)
+        live = Complaint(
+            narrative="Synthetic live submission.",
+            status=ComplaintStatus.classified,
+            classification_outcome=ClassificationState.succeeded,
+            classification_source="stub",
+            classification_was_fallback=True,
+        )
         session.add_all([user, historic, live])
         await session.flush()
         session.add_all(

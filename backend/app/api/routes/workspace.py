@@ -28,7 +28,7 @@ from app.config import settings
 from app.core.deps import get_current_user, get_redis, require_writer
 from app.database import get_session
 from app.middleware.rate_limit import limiter
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.user import User
 from app.schemas.workspace import EnqueueResult, StreamInfo, WorkspaceBoard
 from app.workers.classification_worker import enqueue_complaint
@@ -97,6 +97,14 @@ async def board(
         needs_review=n(ComplaintStatus.needs_review),
         resolved=n(ComplaintStatus.resolved),
         total=sum(int(c) for c in counts.values()),
+        classification_unavailable=(
+            await session.exec(
+                select(func.count(Complaint.id)).where(
+                    Complaint.classification_outcome == ClassificationState.unavailable,
+                    Complaint.status != ComplaintStatus.resolved,
+                )
+            )
+        ).one(),
         classification_stream=await _stream_info(redis, settings.classification_queue),
         resolution_stream=await _stream_info(redis, settings.resolution_queue),
     )
@@ -147,7 +155,13 @@ async def enqueue_resolution_batch(
     """
     complaints = (
         await session.exec(
-            select(Complaint).where(Complaint.status == ComplaintStatus.escalated).limit(limit)
+            select(Complaint)
+            .where(
+                Complaint.status == ComplaintStatus.escalated,
+                Complaint.classification_outcome != ClassificationState.unavailable,
+                Complaint.classification_stale.is_(False),
+            )
+            .limit(limit)
         )
     ).all()
     for complaint in complaints:

@@ -34,11 +34,12 @@ from typing import Any
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
+from sqlmodel import select
 
 from app.config import Settings
 from app.config import settings as default_settings
 from app.database import AsyncSessionLocal
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.services.classifier import Classifier
 from app.services.embedder import embed_text
 from app.services.graph_store import GraphStore, get_default_graph_store
@@ -221,6 +222,20 @@ class ClassificationWorker:
             if complaint is None:
                 logger.warning("complaint %s not found; dropping", complaint_id)
                 return  # poison -> ack
+            if (
+                complaint.status == ComplaintStatus.resolved
+                or complaint.classification_source == "manual"
+            ):
+                return  # redelivery must not replace a human decision
+            original = (
+                complaint.narrative,
+                complaint.product,
+                complaint.issue,
+                complaint.company,
+                complaint.status,
+                complaint.updated_at,
+                complaint.classification_outcome,
+            )
 
             # The LLM call is synchronous and network-bound; trampoline it off the
             # event loop so blocking on Ollama doesn't stall the whole worker.
@@ -232,20 +247,68 @@ class ClassificationWorker:
                 company=complaint.company,
             )
             cls = outcome.classification
+            # Re-read after inference so a manual decision made while the model
+            # was running cannot be overwritten. The lock covers only writes.
+            complaint = (
+                await session.exec(
+                    select(Complaint)
+                    .where(Complaint.id == complaint_id)
+                    .with_for_update()
+                    .execution_options(populate_existing=True)
+                )
+            ).one_or_none()
+            if complaint is None:
+                return
+            current = (
+                complaint.narrative,
+                complaint.product,
+                complaint.issue,
+                complaint.company,
+                complaint.status,
+                complaint.updated_at,
+                complaint.classification_outcome,
+            )
+            if current != original or complaint.classification_source == "manual":
+                logger.info("classification result discarded after case changed: %s", complaint_id)
+                return
 
-            complaint.sentiment = cls.sentiment
-            complaint.intent = cls.intent
-            complaint.urgency = cls.urgency
-            complaint.priority_score = compute_priority_score(cls.urgency, cls.sentiment)
-            high = is_high_priority(cls.urgency, cls.sentiment)
-            complaint.status = ComplaintStatus.escalated if high else ComplaintStatus.classified
-            complaint.updated_at = datetime.utcnow()
+            now = datetime.utcnow()
+            complaint.classification_attempted_at = now
+            complaint.classification_latency_ms = outcome.latency_ms
+            high = False
+            if outcome.succeeded and cls is not None:
+                complaint.sentiment = cls.sentiment
+                complaint.intent = cls.intent
+                complaint.urgency = cls.urgency
+                complaint.priority_score = compute_priority_score(cls.urgency, cls.sentiment)
+                high = is_high_priority(cls.urgency, cls.sentiment)
+                complaint.status = ComplaintStatus.escalated if high else ComplaintStatus.classified
+                complaint.classification_outcome = ClassificationState.succeeded
+                complaint.classification_source = outcome.provider
+                complaint.classification_was_fallback = outcome.is_fallback
+                complaint.classification_stale = False
+                complaint.classification_error = None
+                complaint.classified_at = now
+            else:
+                complaint.classification_outcome = ClassificationState.unavailable
+                complaint.classification_error = "providers_unavailable"
+                complaint.classification_stale = any(
+                    v is not None
+                    for v in (complaint.sentiment, complaint.intent, complaint.urgency)
+                )
+                # Retain existing labels and their provenance; an outage does
+                # not supply replacement labels or reopen a finished case.
+                if complaint.status == ComplaintStatus.pending:
+                    complaint.status = ComplaintStatus.needs_review
+            complaint.updated_at = now
             session.add(complaint)
 
             # One transaction: the classification and its audit log land together.
             self.tracker.record(
                 session,
-                operation="classify",
+                operation="classify"
+                if outcome.succeeded and cls is not None
+                else "classify_unavailable",
                 provider=outcome.provider,
                 model=outcome.model,
                 prompt_tokens=outcome.prompt_tokens,
@@ -256,11 +319,11 @@ class ClassificationWorker:
             )
             await session.commit()
 
-        if not outcome.succeeded:
+        if not outcome.succeeded or cls is None:
             logger.warning(
-                "complaint %s classified by deterministic fallback (providers down)",
-                complaint_id,
+                "complaint %s needs manual triage: classification unavailable", complaint_id
             )
+            return
         if high:
             await self._trigger_resolution(complaint_id, cls)
 

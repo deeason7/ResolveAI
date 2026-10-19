@@ -162,9 +162,13 @@ complete import from the existence of a nonempty output file.
    `.streamlit/secrets.toml.example`):
    ```toml
    API_URL = "https://<your-space>.hf.space"
+   ENVIRONMENT = "production"
    ```
    Streamlit exposes top-level secrets as environment variables, which is how the
-   dashboard's `os.environ.get("API_URL")` reaches the Space.
+   dashboard's `os.environ.get("API_URL")` reaches the Space. Keep HTTPS and
+   certificate verification enabled: production refresh cookies carry `Secure`
+   and will not be sent over HTTP. The client rejects an HTTP API_URL outside
+   development.
 
 ---
 
@@ -181,8 +185,14 @@ staff access. Then:
 - A complaint's **Similar** list returns matches → Qdrant Cloud is populated.
 - A **company profile** / graph view renders → Aura + APOC are working.
 
-If a page errors with "API unreachable", the `API_URL` secret is wrong or the
-Space is still cold-starting (give it a minute on first hit).
+Sign in with a synthetic account, let its access token expire, then reload an
+uncached case to verify refresh over HTTPS. Log out and confirm sign-in is required
+again. These are deployment checks; the unit cookie tests are not browser or live
+hosting verification.
+
+If a page reports "API unavailable or timed out", inspect the HTTPS `API_URL`
+secret, certificate and Space startup state. Requests have bounded timeouts, so a
+cold start may require another attempt. Do not disable certificate verification.
 
 ## Releasing
 

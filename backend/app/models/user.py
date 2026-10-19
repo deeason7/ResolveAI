@@ -25,7 +25,11 @@ class User(SQLModel, table=True):
     # EnumString stores the enum as VARCHAR (matching the migration's column)
     # instead of a native Postgres `userrole` type that was never created — same
     # treatment as Complaint.status, and reads come back as the enum.
-    role: UserRole = Field(default=UserRole.viewer, sa_type=EnumString(UserRole))
+    role: UserRole = Field(
+        default=UserRole.viewer,
+        sa_type=EnumString(UserRole),
+        sa_column_kwargs={"server_default": "viewer"},
+    )
     is_active: bool = Field(default=True)
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

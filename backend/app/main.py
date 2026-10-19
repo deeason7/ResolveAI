@@ -11,8 +11,10 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Request
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
+from redis import exceptions as redis_errors
 from slowapi.errors import RateLimitExceeded
 from slowapi.middleware import SlowAPIMiddleware
 
@@ -60,9 +62,37 @@ def create_app() -> FastAPI:
         lifespan=lifespan,
     )
 
+    @app.exception_handler(RequestValidationError)
+    async def validation_handler(request: Request, exc: RequestValidationError) -> JSONResponse:
+        # Pydantic's default error includes submitted input (including passwords).
+        # Locations and messages are enough for clients to correct their request.
+        return JSONResponse(
+            status_code=422,
+            content={
+                "detail": [
+                    {key: error[key] for key in ("type", "loc", "msg")} for error in exc.errors()
+                ]
+            },
+        )
+
     # Rate limiting
     app.state.limiter = limiter
     app.add_middleware(SlowAPIMiddleware)
+
+    def rate_limit_storage_error(request: Request, exc: Exception) -> JSONResponse:
+        # SlowAPI's middleware looks up the exact exception type and requires
+        # a synchronous handler. An unavailable limit store must not bypass it.
+        logger.warning("Redis request limiting failed: %s", type(exc).__name__)
+        return JSONResponse(
+            status_code=503, content={"detail": "Request limiting service temporarily unavailable"}
+        )
+
+    # SlowAPI looks up exact types instead of walking exception inheritance.
+    # Include Redis subclasses such as authentication/OOM errors as well as
+    # timeouts; its fallback assumes RateLimitExceeded and would itself fail.
+    for error_type in vars(redis_errors).values():
+        if isinstance(error_type, type) and issubclass(error_type, redis_errors.RedisError):
+            app.add_exception_handler(error_type, rate_limit_storage_error)
 
     @app.exception_handler(RateLimitExceeded)
     async def rate_limit_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:

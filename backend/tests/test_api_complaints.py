@@ -109,6 +109,9 @@ class TestSubmit:
         assert body["narrative"] == VALID_COMPLAINT["narrative"]
         assert body["state"] == "CA"
         assert body["status"] == "pending"
+        assert body["classification_outcome"] == "pending"
+        assert body["classification_stale"] is False
+        assert body["classification_error"] is None
 
     async def test_submit_requires_auth(self, client: AsyncClient):
         r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT)
@@ -419,6 +422,47 @@ QUEUE_URL = "/api/v1/complaints/queue"
 
 
 class TestTriageQueue:
+    async def test_unavailable_filter_exposes_null_labels_and_retained_provenance(
+        self, client: AsyncClient, analyst_token: str
+    ):
+        from app.models.complaint import ClassificationState, ComplaintStatus
+
+        await _seed_queue(
+            _queued(
+                company="No labels",
+                status=ComplaintStatus.needs_review,
+                classification_outcome=ClassificationState.unavailable,
+                sentiment=None,
+                urgency=None,
+                priority_score=None,
+                classification_error="providers_unavailable",
+            ),
+            _queued(
+                company="Retained",
+                classification_outcome=ClassificationState.unavailable,
+                classification_stale=True,
+                classification_source="groq",
+            ),
+            _queued(company="Success", classification_outcome=ClassificationState.succeeded),
+            _queued(
+                company="Closed",
+                status=ComplaintStatus.resolved,
+                classification_outcome=ClassificationState.unavailable,
+            ),
+        )
+        r = await client.get(
+            QUEUE_URL,
+            params={"classification_outcome": "unavailable"},
+            headers=_auth(analyst_token),
+        )
+        assert r.status_code == 200, r.text
+        rows = {row["company"]: row for row in r.json()["items"]}
+        assert set(rows) == {"No labels", "Retained"}
+        assert rows["No labels"]["urgency"] is None
+        assert rows["No labels"]["classification_error"] == "providers_unavailable"
+        assert rows["Retained"]["classification_source"] == "groq"
+        assert rows["Retained"]["classification_stale"] is True
+
     async def test_orders_by_priority_desc_nulls_last(
         self, client: AsyncClient, analyst_token: str
     ):

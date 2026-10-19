@@ -16,6 +16,7 @@ import streamlit as st
 import api_client
 import tour
 from api_client import ApiError
+from classification import can_generate, classification_label, classification_notice
 from theme import DEMO_HINT, SENTIMENT_BADGES
 
 HANDOFF_KEY = "detail_complaint_id"
@@ -51,11 +52,17 @@ def _header(c: dict) -> None:
     st.subheader(f"{c['company'] or 'Unknown company'} — {c['product'] or 'no product'}")
     received = (c["date_received"] or c["created_at"])[:10]
     st.caption(f"`{c['id']}` · received {received} · issue: {c['issue'] or 'n/a'}")
+    st.caption(classification_label(c))
+    if c.get("classification_outcome") == "unavailable":
+        st.warning(classification_notice(c))
+    else:
+        st.info(classification_notice(c))
 
     chips = st.columns(4)
     chips[0].metric("Sentiment", SENTIMENT_BADGES.get(c["sentiment"], "⚪ n/a"))
     chips[1].metric("Intent", c["intent"] or "n/a")
-    chips[2].metric("Urgency", f"{c['urgency']} / 5" if c["urgency"] else "n/a")
+    urgency_label = "Prior urgency (stale)" if c.get("classification_stale") else "Urgency"
+    chips[2].metric(urgency_label, f"{c['urgency']} / 5" if c["urgency"] else "Unknown")
     chips[3].metric("Status", c["status"])
 
 
@@ -68,12 +75,15 @@ def _narrative_panel(c: dict) -> None:
         with st.container(height=380, border=True):
             st.text(c["narrative"])
     with right:
-        st.markdown("**Classification**")
+        label = (
+            "Prior classification (stale)" if c.get("classification_stale") else "Classification"
+        )
+        st.markdown(f"**{label}**")
         with st.container(border=True):
             st.write(
                 f"Priority score: `{c['priority_score']:.2f}`"
-                if c["priority_score"]
-                else "Priority score: n/a"
+                if c["priority_score"] is not None
+                else "Priority score: unknown"
             )
             st.write(f"State: `{c['state'] or 'n/a'}`")
             st.write(f"Sub-product: {c['sub_product'] or 'n/a'}")
@@ -123,8 +133,8 @@ def _generate_button(c: dict) -> None:
     if st.button(
         "⚙️ Generate resolution",
         type="primary",
-        disabled=demo,
-        help=DEMO_HINT if demo else None,
+        disabled=demo or not can_generate(c),
+        help=DEMO_HINT if demo else "Complete classification or manual triage before drafting.",
     ):
         try:
             api_client.generate_resolution(c["id"])

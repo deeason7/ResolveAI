@@ -165,6 +165,15 @@ class TestDrift:
             _log(complaint_id=extreme.id),  # re-classified: counts per event
             _log(complaint_id=unlabeled.id),
             _log(complaint_id=negative.id, operation="resolve"),  # non-classify excluded
+            _log(
+                complaint_id=negative.id,
+                operation="classify_unavailable",
+                provider="none",
+                prompt_tokens=None,
+                completion_tokens=None,
+                cost_usd=None,
+                latency_ms=1234,
+            ),
         )
         r = await client.get(DRIFT_URL, headers=_auth(token))
         assert r.status_code == 200

@@ -28,7 +28,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.core.deps import get_current_user, get_redis, require_writer
 from app.database import get_session
 from app.models.audit_log import AuditLog
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.resolution import GuardrailStatus, Resolution
 from app.models.user import User
 from app.schemas.resolution import (
@@ -69,6 +69,18 @@ async def _latest_resolution(session: AsyncSession, complaint_id: uuid.UUID) -> 
     return (await session.exec(stmt)).first()
 
 
+def _require_current_classification(complaint: Complaint) -> None:
+    if (
+        complaint.sentiment is None
+        or complaint.classification_outcome == ClassificationState.unavailable
+        or complaint.classification_stale
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="Complaint needs a current classification before generating a draft",
+        )
+
+
 @router.post(
     "/{complaint_id}/generate",
     response_model=ResolutionQueued,
@@ -88,11 +100,7 @@ async def generate_resolution(
     complaint = await _complaint_or_404(session, complaint_id)
     current = _status_value(complaint)
 
-    if complaint.sentiment is None:
-        raise HTTPException(
-            status_code=status.HTTP_409_CONFLICT,
-            detail="Complaint is awaiting classification; generate after it's classified",
-        )
+    _require_current_classification(complaint)
     if current == ComplaintStatus.agent_triggered.value:
         raise HTTPException(
             status_code=status.HTTP_409_CONFLICT,
@@ -239,6 +247,8 @@ async def reject_resolution(
     resolution = await _latest_resolution(session, complaint_id)
     if resolution is None:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No resolution to reject")
+
+    _require_current_classification(complaint)
 
     complaint.status = ComplaintStatus.agent_triggered
     complaint.updated_at = datetime.utcnow()

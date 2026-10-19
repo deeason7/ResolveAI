@@ -12,6 +12,7 @@ known workflow limitations in [architecture.md](architecture.md).
                  :80 / :443
 internet ──────────────────▶  Caddy  ──▶  frontend (Streamlit)
                               (TLS)              │  server-side
+                                   Caddy :8443 (private HTTPS)
                                                  ▼
                                                api (FastAPI)
                                                  │
@@ -24,8 +25,14 @@ internet ──────────────────▶  Caddy  ─�
 - **Only Caddy is published** (80/443). The API and every datastore stay on the
   internal Docker network with no host ports. The browser never talks to the API
   directly — Streamlit calls it server-side. Network isolation is only one
-  part of access control; it does not validate API authorization or session transport. (`ENVIRONMENT=production` also leaves the API's
+  part of access control; it does not replace API authorization. (`ENVIRONMENT=production` also leaves the API's
   CORS allow-list empty, which is correct here.)
+- **Streamlit uses verified HTTPS for API sessions.** Compose sets `API_URL` to
+  `https://DOMAIN:8443` and registers `DOMAIN` as a network alias for Caddy. The
+  private listener uses the domain certificate; port 8443 has no host mapping.
+  This lets the server-side HTTP cookie jar send production `Secure` refresh
+  cookies. Keep `--env-file .env.production` on every Compose command so DOMAIN
+  is interpolated; a missing DOMAIN fails configuration.
 - **Caddy provisions and renews TLS automatically** from Let's Encrypt for your
   domain. No certbot, no cron.
 - **The stream workers run as services** (`classification-worker`,
@@ -98,8 +105,15 @@ cp .env.production.example .env.production
 # Keep the paired values in sync (POSTGRES_PASSWORD/DATABASE_URL,
 # REDIS_PASSWORD/REDIS_URL, NEO4J_PASSWORD/NEO4J_AUTH).
 
-docker compose -f docker-compose.prod.yml up -d --build
+docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 ```
+
+Use the publicly resolvable domain alone for `DOMAIN` (no scheme, path or port).
+Caddy must obtain a trusted certificate before sign-in can succeed. HTTPS client
+verification stays enabled; a staging certificate deliberately fails that check.
+The private alias does not add a public API route. See the official
+[Caddy site-address rules](https://caddyserver.com/docs/caddyfile/concepts) and
+[Compose aliases](https://docs.docker.com/reference/compose-file/services/#aliases).
 
 `--build` builds the `api` and `frontend` images first; the two worker services
 reuse the freshly tagged `resolveai/api:latest`, so they need the build to
@@ -121,13 +135,32 @@ page (the workers are already running).
 Visit `https://your.domain` — Caddy will have issued the certificate on first
 request.
 
+## Verify session transport before release
+
+From the frontend container, request the private API without suppressing certificate
+checks:
+
+```bash
+docker compose --env-file .env.production -f docker-compose.prod.yml exec frontend python -c 'import os, httpx; r = httpx.get(os.environ["API_URL"] + "/api/v1/auth/capabilities", timeout=10); r.raise_for_status(); print(r.status_code)'
+```
+
+Sign in using a synthetic provisioned account, allow its short-lived access token
+to expire, then reload an uncached case. Verify refresh succeeds and logout ends
+the session. The cookie remains in the per-session server-side client, not the
+browser. Verify that host port 8443 is unreachable externally. Unit transport
+tests exercise Secure-cookie selection, but do not establish certificate issuance,
+Docker routing, browser behavior or live renewal; record this deployment drill.
+A local Caddy 2.8.4 drill with a temporary CA and synthetic upstream verified the
+private/public routes, certificate rejection and Secure-cookie transport. It did
+not exercise public ACME or the actual application release image.
+
 ## Operations
 
-- **Logs:** `docker compose -f docker-compose.prod.yml logs -f caddy api classification-worker`
+- **Logs:** `docker compose --env-file .env.production -f docker-compose.prod.yml logs -f caddy api classification-worker`
 - **Update to a new release:**
   ```bash
   git pull
-  docker compose -f docker-compose.prod.yml up -d --build
+  docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
   ```
 - **Back up PostgreSQL logically.** Do not tar a running PostgreSQL data directory;
   the removed live-volume recipe did not establish a consistent recoverable backup.
@@ -151,9 +184,13 @@ request.
 - **Certificate never issues / site shows a TLS error.** Check, in order: the
   `A` record resolves (`dig +short your.domain`), ports 80 **and** 443 are open
   in your cloud firewall, and `ACME_EMAIL`/`DOMAIN` are set in `.env.production`.
-  Watch `docker compose -f docker-compose.prod.yml logs -f caddy`. While testing
+  Watch `docker compose --env-file .env.production -f docker-compose.prod.yml logs -f caddy`. While testing
   repeatedly, switch to Let's Encrypt staging to avoid consuming issuance quotas — add `acme_ca https://acme-staging-v02.api.letsencrypt.org/directory`
   to the global options block in `Caddyfile`, then remove it for the real cert.
+- **Sign-in reports an unavailable API or TLS failure.** Verify Caddy has issued
+  a trusted certificate, `DOMAIN` is the same hostname in both containers, and the
+  Compose invocation includes `--env-file .env.production`. Run the private HTTPS
+  check above. Do not change `Secure` to false or turn certificate verification off.
 - **App loads but hangs on "Please wait…".** That's the Streamlit WebSocket
   being blocked. Confirm Caddy proxies WebSockets to `frontend:8501` and inspect
   logs. The current image disables CORS/XSRF protections; treat this as an

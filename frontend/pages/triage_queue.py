@@ -15,6 +15,13 @@ import streamlit as st
 import api_client
 import tour
 from api_client import ApiError
+from classification import (
+    OUTCOME_LABELS,
+    can_generate,
+    classification_label,
+    classification_notice,
+    triage_filter,
+)
 from theme import DEMO_HINT, SENTIMENT_BADGES
 
 STATUS_OPTIONS = [
@@ -32,6 +39,14 @@ PAGE_SIZES = [25, 50, 100]
 
 
 def _filters() -> dict:
+    outcome = st.selectbox(
+        "Classification",
+        [
+            "All outcomes",
+            "Needs triage",
+            *[label for key, label in OUTCOME_LABELS.items() if key != "unavailable"],
+        ],
+    )
     c1, c2, c3, c4, c5 = st.columns([1.2, 1.2, 1.5, 1.5, 1])
     status = c1.selectbox("Status", STATUS_OPTIONS)
     sentiment = c2.selectbox("Sentiment", ["any", "neutral", "negative", "extreme_negative"])
@@ -46,6 +61,7 @@ def _filters() -> dict:
     page = c5.number_input("Page", min_value=1, value=1, step=1)
 
     params: dict = {"limit": page_size, "offset": (page - 1) * page_size}
+    params.update(triage_filter(outcome))
     if status != "all actionable":
         params["status"] = status
     if sentiment != "any":
@@ -63,6 +79,7 @@ def _filters() -> dict:
 
 def _queue_table(items: list[dict]) -> int | None:
     df = pd.DataFrame(items)
+    df["classification"] = [classification_label(item) for item in items]
     df["sentiment"] = df["sentiment"].map(SENTIMENT_BADGES).fillna("⚪ n/a")
     df["received"] = pd.to_datetime(df["date_received"].fillna(df["created_at"]))
     view = df[
@@ -70,6 +87,7 @@ def _queue_table(items: list[dict]) -> int | None:
             "priority_score",
             "urgency",
             "sentiment",
+            "classification",
             "company",
             "product",
             "status",
@@ -89,6 +107,7 @@ def _queue_table(items: list[dict]) -> int | None:
             ),
             "urgency": st.column_config.NumberColumn("Urgency", format="%d ⚡"),
             "sentiment": "Sentiment",
+            "classification": "Classification evidence",
             "company": "Company",
             "product": "Product",
             "status": "Status",
@@ -107,6 +126,7 @@ def _action_panel(item: dict) -> None:
             f"· status `{item['status']}` · intent `{item['intent'] or 'n/a'}`"
         )
         st.write(item["narrative_preview"] + ("…" if len(item["narrative_preview"]) == 200 else ""))
+        st.caption(classification_notice(item))
 
         demo = api_client.is_demo()
         opener, trigger, hint = st.columns([1, 1, 2])
@@ -117,8 +137,8 @@ def _action_panel(item: dict) -> None:
             "⚙️ Generate resolution",
             type="primary",
             use_container_width=True,
-            disabled=demo,
-            help=DEMO_HINT if demo else None,
+            disabled=demo or not can_generate(item),
+            help=DEMO_HINT if demo else "Complete classification or manual triage before drafting.",
         ):
             try:
                 api_client.generate_resolution(item["id"])

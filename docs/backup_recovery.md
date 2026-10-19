@@ -46,7 +46,8 @@ backend/.venv/bin/python scripts/backup_state.py --database-url-env RESTORE_DATA
 ```
 
 4. Compare reported inserted counts with the manifest; inspect case IDs, foreign
-   keys, statuses, exact draft text, labels and audit history. Time the drill with
+   keys, statuses, exact draft text, classification outcomes/provenance/staleness,
+   labels and audit history. Time the drill with
    the intended corpus size and record server/application/schema versions.
 5. Upgrade only after the restored revision is verified. Rebuild graph/vector
    derivatives from canonical data, then verify those separately.

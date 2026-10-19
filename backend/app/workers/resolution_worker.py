@@ -50,7 +50,7 @@ from sqlmodel import select
 from app.config import Settings
 from app.config import settings as default_settings
 from app.database import AsyncSessionLocal
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.resolution import GuardrailStatus, Resolution
 from app.schemas.classification import ComplaintClassification
 from app.services.agent.orchestrator import (
@@ -389,7 +389,13 @@ class ResolutionWorker:
         Returns None when the row was never classified (or holds junk) — that's
         a poison message, not a crash.
         """
-        if complaint.sentiment is None or complaint.intent is None or complaint.urgency is None:
+        if (
+            complaint.classification_outcome == ClassificationState.unavailable
+            or complaint.classification_stale
+            or complaint.sentiment is None
+            or complaint.intent is None
+            or complaint.urgency is None
+        ):
             return None
         try:
             return ComplaintClassification(

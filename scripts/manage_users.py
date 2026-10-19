@@ -99,17 +99,18 @@ async def create_user(
     if password_reader is None:
         raise ValueError("A password source is required for a new account")
     password = password_reader()
+    if len(password.encode("utf-8")) > 72:
+        raise ValueError("New bcrypt passwords must not exceed 72 UTF-8 bytes")
     try:
         RegisterRequest(email=email, full_name=full_name, password=password)
     except ValidationError:
         raise ValueError("New account fields do not meet registration requirements") from None
-    if len(password.encode("utf-8")) > 72:
-        raise ValueError("New bcrypt passwords must not exceed 72 UTF-8 bytes")
+    hashed = await asyncio.to_thread(bcrypt.hashpw, password.encode(), bcrypt.gensalt())
     user = User(
         email=email,
         full_name=full_name,
         role=role,
-        hashed_password=bcrypt.hashpw(password.encode(), bcrypt.gensalt()).decode(),
+        hashed_password=hashed.decode(),
     )
     session.add(user)
     await session.flush()
@@ -167,6 +168,58 @@ async def set_role(
     }
 
 
+async def reset_password(
+    session: AsyncSession,
+    *,
+    user_id: uuid.UUID,
+    expected_email: str,
+    reason: str,
+    apply: bool = False,
+    password_reader: Callable[[], str] | None = None,
+) -> dict:
+    """Recover one confirmed account; never guess which old hashes were truncated."""
+    if not reason.strip() or len(reason) > 500:
+        raise ValueError("A reset reason between 1 and 500 characters is required")
+    user = (await session.exec(select(User).where(User.id == user_id).with_for_update())).first()
+    if user is None or user.email != _email(expected_email):
+        raise ValueError("Selected user ID and expected email do not match an account")
+    report = {
+        "action": "password_reset" if apply else "would_reset_password",
+        "applied": apply,
+        "user": _public(user),
+        "session_effect": (
+            "Existing refresh sessions are invalidated on commit; issued access tokens "
+            "remain valid until expiry unless the account is disabled"
+        ),
+    }
+    if not apply:
+        return report
+    if password_reader is None:
+        raise ValueError("A password source is required for a reset")
+    password = password_reader()
+    try:
+        RegisterRequest(email=user.email, full_name=user.full_name, password=password)
+    except ValidationError:
+        raise ValueError(
+            "New password must contain at least 8 characters and at most 72 UTF-8 bytes"
+        ) from None
+    hashed = await asyncio.to_thread(bcrypt.hashpw, password.encode(), bcrypt.gensalt())
+    user.hashed_password = hashed.decode()
+    user.updated_at = datetime.utcnow()
+    session.add(user)
+    session.add(
+        AuditLog(
+            event="account_password_reset",
+            metadata_={
+                "target_user_id": str(user.id),
+                "reason": reason.strip(),
+                "source": "manage_users",
+            },
+        )
+    )
+    return report
+
+
 def _password_reader(env_name: str | None) -> str:
     if env_name:
         value = os.environ.get(env_name)
@@ -174,8 +227,8 @@ def _password_reader(env_name: str | None) -> str:
             raise ValueError("The selected password environment variable is empty")
         return value
     if not sys.stdin.isatty():
-        raise ValueError("Use a terminal or --password-env for new account creation")
-    password = getpass.getpass("New account password: ")
+        raise ValueError("Use a terminal or --password-env for account password changes")
+    password = getpass.getpass("New password: ")
     if password != getpass.getpass("Repeat password: "):
         raise ValueError("Passwords do not match")
     return password
@@ -211,6 +264,12 @@ def parser() -> argparse.ArgumentParser:
     change.add_argument("--expected-role", type=UserRole, choices=list(UserRole), required=True)
     change.add_argument("--role", type=UserRole, choices=list(UserRole), required=True)
     change.add_argument("--apply", action="store_true")
+    reset = actions.add_parser("reset-password", help="Reset one confirmed account password")
+    reset.add_argument("--user-id", type=uuid.UUID, required=True)
+    reset.add_argument("--expected-email", required=True)
+    reset.add_argument("--reason", required=True)
+    reset.add_argument("--password-env", metavar="NAME")
+    reset.add_argument("--apply", action="store_true")
     return command
 
 
@@ -238,6 +297,15 @@ async def run(args: argparse.Namespace) -> dict:
                     full_name=args.full_name,
                     role=args.role,
                     demo_email=args.demo_email,
+                    apply=args.apply,
+                    password_reader=lambda: _password_reader(args.password_env),
+                )
+            if args.action == "reset-password":
+                return await reset_password(
+                    session,
+                    user_id=args.user_id,
+                    expected_email=args.expected_email,
+                    reason=args.reason,
                     apply=args.apply,
                     password_reader=lambda: _password_reader(args.password_env),
                 )

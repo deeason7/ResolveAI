@@ -45,18 +45,23 @@ class LLMOpsTracker:
         operation: str,
         provider: str,
         model: str,
-        prompt_tokens: int,
-        completion_tokens: int,
+        prompt_tokens: int | None,
+        completion_tokens: int | None,
         latency_ms: int,
         was_fallback: bool,
         complaint_id: uuid.UUID | None = None,
     ) -> LLMLog:
         # Local inference has no marginal cost; only meter cloud providers.
-        cost = (
-            0.0
-            if provider == "ollama"
-            else estimate_cost_usd(model, prompt_tokens, completion_tokens)
-        )
+        if prompt_tokens is None or completion_tokens is None:
+            # A failed attempt may have reached a billable provider. Missing
+            # usage is unknown, not evidence of zero tokens or zero cost.
+            cost = None
+        else:
+            cost = (
+                0.0
+                if provider == "ollama"
+                else estimate_cost_usd(model, prompt_tokens, completion_tokens)
+            )
         return LLMLog(
             complaint_id=complaint_id,
             operation=operation,

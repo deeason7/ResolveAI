@@ -4,6 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
+from sqlalchemy import false
 from sqlmodel import Field, SQLModel
 
 from app.models.types import EnumString
@@ -26,6 +27,16 @@ class ComplaintStatus(str, Enum):
     draft_ready = "draft_ready"  # guardrail-passed draft awaiting human review
     needs_review = "needs_review"  # agent failed or unavailable; human takes over
     resolved = "resolved"  # human approved a resolution; case closed
+
+
+class ClassificationState(str, Enum):
+    """Latest classification outcome, independent of the case lifecycle."""
+
+    pending = "pending"
+    succeeded = "succeeded"
+    unavailable = "unavailable"
+    manual = "manual"
+    legacy_unknown = "legacy_unknown"
 
 
 class Complaint(SQLModel, table=True):
@@ -63,6 +74,21 @@ class Complaint(SQLModel, table=True):
     intent: str | None = Field(default=None, max_length=100)
     urgency: int | None = Field(default=None, ge=1, le=5)
     priority_score: float | None = Field(default=None, ge=0.0, le=1.0)
+
+    classification_outcome: ClassificationState = Field(
+        default=ClassificationState.pending,
+        sa_type=EnumString(ClassificationState),
+        sa_column_kwargs={"server_default": "pending"},
+        index=True,
+    )
+    # Source describes the retained labels, not a failed replacement attempt.
+    classification_source: str | None = Field(default=None, max_length=100)
+    classification_stale: bool = Field(default=False, sa_column_kwargs={"server_default": false()})
+    classification_attempted_at: datetime | None = None
+    classified_at: datetime | None = None
+    classification_error: str | None = Field(default=None, max_length=50)
+    classification_latency_ms: int | None = None
+    classification_was_fallback: bool | None = None
 
     created_at: datetime = Field(default_factory=datetime.utcnow)
     updated_at: datetime = Field(default_factory=datetime.utcnow)

@@ -14,7 +14,7 @@ from datetime import datetime
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 
 
 class ComplaintCreate(BaseModel):
@@ -29,7 +29,18 @@ class ComplaintCreate(BaseModel):
     state: str | None = Field(default=None, min_length=2, max_length=2)
 
 
-class ComplaintPublic(BaseModel):
+class ClassificationMetadata(BaseModel):
+    classification_outcome: ClassificationState
+    classification_source: str | None
+    classification_stale: bool
+    classification_attempted_at: datetime | None
+    classified_at: datetime | None
+    classification_error: str | None
+    classification_latency_ms: int | None
+    classification_was_fallback: bool | None
+
+
+class ComplaintPublic(ClassificationMetadata):
     """Full complaint as returned by GET /complaints/{id} and POST /complaints/."""
 
     model_config = ConfigDict(from_attributes=True)
@@ -66,7 +77,7 @@ class ComplaintListResponse(BaseModel):
 QUEUE_PREVIEW_CHARS = 200
 
 
-class ComplaintQueueItem(BaseModel):
+class ComplaintQueueItem(ClassificationMetadata):
     """Lean triage-queue row.
 
     The queue is a table view — shipping each row's full narrative (up to
@@ -104,6 +115,7 @@ class ComplaintQueueItem(BaseModel):
             narrative_preview=complaint.narrative[:QUEUE_PREVIEW_CHARS],
             date_received=complaint.date_received,
             created_at=complaint.created_at,
+            **{name: getattr(complaint, name) for name in ClassificationMetadata.model_fields},
         )
 
 

@@ -1,7 +1,7 @@
 # Production topology for ResolveAI.
 #
 # Use this file on its own — NOT as an overlay on docker-compose.yml:
-#   docker compose -f docker-compose.prod.yml up -d --build
+#   docker compose --env-file .env.production -f docker-compose.prod.yml up -d --build
 #
 # Why standalone instead of an override: Compose *concatenates* list keys like
 # `volumes` when merging files, so an override can't remove the dev source
@@ -16,8 +16,8 @@
 #   - Ollama is opt-in behind the `local-llm` profile; by default we classify
 #     through Groq (LLM_SKIP_LOCAL=true) — the right call for ARM/low-RAM hosts
 #
-# Every service is self-sufficient from .env.production (no ${..} interpolation),
-# so there's no "forgot --env-file" footgun.
+# --env-file supplies DOMAIN for the private HTTPS alias and frontend API_URL.
+# The required-variable expression fails configuration when DOMAIN is missing.
 
 x-backend-common: &backend-common
   env_file: .env.production
@@ -39,6 +39,10 @@ services:
     image: caddy:2.8-alpine
     restart: unless-stopped
     env_file: .env.production          # DOMAIN + ACME_EMAIL, read by the Caddyfile
+    environment:
+      # Use the same interpolated value as the alias/API_URL even if the shell
+      # overrides --env-file; TLS hostname and routing must stay aligned.
+      DOMAIN: "${DOMAIN:?Set DOMAIN via --env-file .env.production}"
     ports:
       - "80:80"
       - "443:443"
@@ -47,6 +51,12 @@ services:
       - ./Caddyfile:/etc/caddy/Caddyfile:ro
       - caddy_data:/data               # ACME account + issued certs — MUST persist
       - caddy_config:/config
+    expose:
+      - "8443"                       # private HTTPS API listener; never a host port
+    networks:
+      default:
+        aliases:
+          - "${DOMAIN:?Set DOMAIN via --env-file .env.production}"
     depends_on:
       - frontend
 
@@ -59,9 +69,9 @@ services:
     restart: unless-stopped
     env_file: .env.production
     environment:
-      # Streamlit sits behind Caddy on a single origin; turning off its own CORS
-      # and XSRF checks is the standard reverse-proxy recipe. Auth lives in the
-      # API (httpOnly cookie), and Caddy is the sole ingress, so nothing is lost.
+      API_URL: "https://${DOMAIN:?Set DOMAIN via --env-file .env.production}:8443"
+      # Existing frontend settings; proxying alone does not establish that
+      # disabling these protections is safe. Deployment hardening remains open.
       STREAMLIT_SERVER_ENABLE_CORS: "false"
       STREAMLIT_SERVER_ENABLE_XSRF_PROTECTION: "false"
     expose:
@@ -77,9 +87,8 @@ services:
       context: ./backend
       dockerfile: Dockerfile
     image: resolveai/api:latest        # tagged here so the workers can reuse it
-    # Drop the dev --reload baked into the Dockerfile CMD. One worker on purpose:
-    # the slowapi limiter keeps per-process counters, so scaling out would need a
-    # shared (redis) limiter backend first.
+    # Drop the dev --reload baked into the Dockerfile CMD. Production rate-limit
+    # counters use Redis; process scaling still needs workload verification.
     command: ["uvicorn", "app.main:app", "--host", "0.0.0.0", "--port", "8000"]
     expose:
       - "8000"
@@ -121,7 +130,9 @@ services:
     env_file: .env.production
     # $$ escapes Compose interpolation so the container shell expands the var
     # from the injected env at runtime; exec keeps redis as PID 1 for signals.
-    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\""]
+    # Spent refresh tokens must survive ordinary restarts without eviction.
+    # Always-fsync trades write latency for a smaller acknowledged-write loss window.
+    command: ["sh", "-c", "exec redis-server --requirepass \"$$REDIS_PASSWORD\" --appendonly yes --appendfsync always --maxmemory-policy noeviction"]
     volumes:
       - redis_data:/data
     healthcheck:

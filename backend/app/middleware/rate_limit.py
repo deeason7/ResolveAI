@@ -18,5 +18,10 @@ _storage = settings.redis_url if settings.environment == "production" else "memo
 limiter = Limiter(
     key_func=get_remote_address,
     storage_uri=_storage,
+    storage_options=(
+        {"socket_connect_timeout": 3, "socket_timeout": 3, "retry_on_timeout": False}
+        if settings.environment == "production"
+        else {}
+    ),
     default_limits=["200/minute"],
 )

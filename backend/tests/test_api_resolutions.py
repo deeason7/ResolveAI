@@ -23,7 +23,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
 from app.models.audit_log import AuditLog
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.resolution import GuardrailStatus, Resolution
 from app.models.user import User, UserRole
 
@@ -136,6 +136,22 @@ async def _audit_events(factory) -> list[AuditLog]:
 
 
 class TestGenerate:
+    @pytest.mark.parametrize("stale", [False, True])
+    async def test_retained_labels_after_outage_are_not_drafting_input(
+        self, client, factory, fake_redis, stale
+    ):
+        cid = await _seed_complaint(
+            factory,
+            classification_outcome=(
+                ClassificationState.succeeded if stale else ClassificationState.unavailable
+            ),
+            classification_stale=stale,
+        )
+        response = await client.post(GENERATE_URL.format(id=cid))
+        assert response.status_code == 409
+        assert "current classification" in response.json()["detail"]
+        assert await fake_redis.xrange(settings.resolution_queue) == []
+
     async def test_queues_and_marks_in_flight(self, client, factory, fake_redis):
         cid = await _seed_complaint(factory, status=ComplaintStatus.classified)
         r = await client.post(GENERATE_URL.format(id=cid))
@@ -266,6 +282,28 @@ class TestApprove:
 
 
 class TestReject:
+    @pytest.mark.parametrize("stale", [False, True])
+    async def test_outage_cannot_queue_rejection_regeneration(
+        self, client, factory, fake_redis, stale
+    ):
+        cid = await _seed_complaint(
+            factory,
+            status=ComplaintStatus.draft_ready,
+            classification_outcome=(
+                ClassificationState.succeeded if stale else ClassificationState.unavailable
+            ),
+            classification_stale=stale,
+        )
+        await _seed_resolution(factory, cid)
+        response = await client.post(
+            REJECT_URL.format(id=cid), json={"feedback": "Please revise this draft"}
+        )
+        assert response.status_code == 409
+        assert await fake_redis.xrange(settings.resolution_queue) == []
+        assert await _audit_events(factory) == []
+        async with factory() as session:
+            assert (await session.get(Complaint, cid)).status == ComplaintStatus.draft_ready
+
     async def test_queues_regeneration_with_feedback(self, client, factory, fake_redis):
         cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
         rid = await _seed_resolution(factory, cid)

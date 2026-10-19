@@ -20,9 +20,11 @@ from urllib.parse import quote
 import httpx
 import streamlit as st
 
-API_URL = os.environ.get("API_URL", "http://api:8000")
+API_URL = os.environ.get("API_URL", "http://api:8000").rstrip("/")
+ENVIRONMENT = os.environ.get("ENVIRONMENT", "development")
 API_PREFIX = "/api/v1"
-TIMEOUT_S = 30.0
+TIMEOUT_S = httpx.Timeout(30.0, connect=5.0)
+AUTH_TIMEOUT_S = httpx.Timeout(10.0, connect=5.0)
 
 _CLIENT_KEY = "_http_client"
 _TOKEN_KEY = "access_token"
@@ -63,6 +65,8 @@ def _http() -> httpx.Client:
     every interaction, so anything that must outlive a rerun — here, the
     refresh-cookie jar — has to live in session_state, not module globals."""
     if _CLIENT_KEY not in st.session_state:
+        if ENVIRONMENT != "development" and httpx.URL(API_URL).scheme != "https":
+            raise ApiError(0, "Server configuration requires an HTTPS API_URL outside development.")
         st.session_state[_CLIENT_KEY] = httpx.Client(
             base_url=API_URL + API_PREFIX, timeout=TIMEOUT_S
         )
@@ -105,24 +109,42 @@ def _detail(resp: httpx.Response) -> str:
     of dict syntax.
     """
     try:
-        detail = resp.json().get("detail", resp.text)
+        payload = resp.json()
     except ValueError:
         return resp.text or f"HTTP {resp.status_code}"
+    detail = payload.get("detail", resp.text) if isinstance(payload, dict) else resp.text
     if isinstance(detail, list):
         return _humanize_validation(detail)
     return str(detail)
 
 
+def _send(method: str, path: str, **kwargs: Any) -> httpx.Response:
+    """Translate transport failures without echoing URLs or credentials into the UI."""
+    try:
+        return _http().request(method, path, **kwargs)
+    except httpx.HTTPError as exc:
+        raise ApiError(0, "API unavailable or timed out. Please try again.") from exc
+
+
+def _access_token(resp: httpx.Response) -> str:
+    try:
+        token = resp.json()["access_token"]
+    except (ValueError, KeyError, TypeError) as exc:
+        raise ApiError(502, "Authentication returned an invalid response.") from exc
+    if not isinstance(token, str) or not token:
+        raise ApiError(502, "Authentication returned an invalid response.")
+    return token
+
+
 def _try_refresh() -> bool:
     """Trade the refresh cookie for a new access token. The jar sends the
     cookie and absorbs the rotated one automatically."""
-    try:
-        resp = _http().post("/auth/refresh")
-    except httpx.HTTPError:
+    resp = _send("POST", "/auth/refresh", timeout=AUTH_TIMEOUT_S)
+    if resp.status_code == 401:
         return False
     if resp.status_code != 200:
-        return False
-    st.session_state[_TOKEN_KEY] = resp.json()["access_token"]
+        raise ApiError(resp.status_code, _detail(resp))
+    st.session_state[_TOKEN_KEY] = _access_token(resp)
     return True
 
 
@@ -132,10 +154,7 @@ def _request(method: str, path: str, *, _retried: bool = False, **kwargs: Any) -
     if token:
         headers["Authorization"] = f"Bearer {token}"
 
-    try:
-        resp = _http().request(method, path, headers=headers, **kwargs)
-    except httpx.HTTPError as exc:
-        raise ApiError(0, f"API unreachable: {exc}") from exc
+    resp = _send(method, path, headers=headers, **kwargs)
 
     if resp.status_code == 401 and token and not _retried:
         if _try_refresh():
@@ -190,18 +209,46 @@ def auth_capabilities() -> dict:
 
 
 def login(email: str, password: str) -> None:
-    resp = _http().post("/auth/login", json={"email": email, "password": password})
-    if resp.status_code != 200:
-        raise ApiError(resp.status_code, _detail(resp))
-    st.session_state[_TOKEN_KEY] = resp.json()["access_token"]
-    st.session_state[_USER_KEY] = me()
+    clear_session()
+    try:
+        resp = _send(
+            "POST",
+            "/auth/login",
+            json={"email": email, "password": password},
+            timeout=AUTH_TIMEOUT_S,
+        )
+        if resp.status_code != 200:
+            raise ApiError(resp.status_code, _detail(resp))
+        token = _access_token(resp)
+        profile = _send(
+            "GET",
+            "/auth/me",
+            headers={"Authorization": f"Bearer {token}"},
+            timeout=AUTH_TIMEOUT_S,
+        )
+        if profile.status_code != 200:
+            raise ApiError(profile.status_code, _detail(profile))
+        try:
+            user = profile.json()
+        except ValueError as exc:
+            raise ApiError(502, "Authentication returned an invalid profile.") from exc
+        if not isinstance(user, dict):
+            raise ApiError(502, "Authentication returned an invalid profile.")
+    except ApiError:
+        clear_session()
+        raise
+    # Publish authentication only once both token and profile were obtained.
+    st.session_state[_TOKEN_KEY] = token
+    st.session_state[_USER_KEY] = user
 
 
 def register(email: str, full_name: str, password: str) -> None:
     """Create an account. Does NOT sign in — the user logs in explicitly afterward."""
-    resp = _http().post(
+    resp = _send(
+        "POST",
         "/auth/register",
         json={"email": email, "full_name": full_name, "password": password},
+        timeout=AUTH_TIMEOUT_S,
     )
     if resp.status_code != 201:
         raise ApiError(resp.status_code, _detail(resp))

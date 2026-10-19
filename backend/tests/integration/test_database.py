@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from alembic.config import Config
 from alembic.script import ScriptDirectory
-from sqlalchemy import func, inspect, text
+from sqlalchemy import MetaData, func, inspect, text
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import select
@@ -42,43 +42,136 @@ async def test_empty_database_migrates_to_head(pg_engine):
     assert revision == script.get_current_head()
 
 
+async def test_raw_inserts_use_safe_defaults_without_overriding_explicit_roles(pg_engine):
+    async with pg_engine.begin() as connection:
+        for role in (None, "admin", "analyst", "viewer"):
+            values = {
+                "id": uuid.uuid4(),
+                "email": f"{role}@example.test",
+                "role": role,
+            }
+            # Raw SQL bypasses all Python/Pydantic defaults.
+            role_column = ", role" if role is not None else ""
+            role_value = ", :role" if role is not None else ""
+            actual = await connection.scalar(
+                text(
+                    "INSERT INTO users (id, email, full_name, hashed_password, created_at, "
+                    f"updated_at{role_column}) VALUES (:id, :email, 'Fixture', 'unused', "
+                    f"CURRENT_TIMESTAMP, CURRENT_TIMESTAMP{role_value}) RETURNING role"
+                ),
+                values,
+            )
+            assert actual == (role or "viewer")
+        row = (
+            await connection.execute(
+                text(
+                    "INSERT INTO complaints (id, narrative, created_at, updated_at) "
+                    "VALUES (:id, 'New synthetic intake', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP) "
+                    "RETURNING classification_outcome, classification_stale, classification_source, "
+                    "classification_error, classification_latency_ms, sentiment, urgency, priority_score"
+                ),
+                {"id": uuid.uuid4()},
+            )
+        ).one()
+        assert tuple(row) == ("pending", False, None, None, None, None, None, None)
+
+
 async def test_previous_revision_upgrades_without_losing_linked_rows(postgres_database):
     await postgres_database.upgrade("d4f8c2b7e1a9")
     sessions = async_sessionmaker(
         postgres_database.engine, class_=AsyncSession, expire_on_commit=False
     )
-    complaint = Complaint(narrative="Synthetic reporting dispute", cfpb_complaint_id="migration-1")
-    user = User(email="migration@example.test", full_name="Test reviewer", hashed_password="unused")
-    async with sessions() as session:
-        session.add_all([complaint, user])
-        await session.flush()
-        label = ComplaintLabel(
-            complaint_id=complaint.id,
-            label_source="synthetic-test",
-            sentiment="negative",
-            intent="dispute_resolution",
-            urgency=4,
-            reasoning="Fixture, not model output",
+    # Reflect the historical schema: the current ORM may require columns that
+    # did not exist in this revision. This fixture must survive future changes.
+    from datetime import datetime
+
+    complaint_id, user_id, label_id, draft_id, audit_id = [uuid.uuid4() for _ in range(5)]
+    now = datetime(2026, 1, 2)
+    stamps = {"created_at": now, "updated_at": now}
+    async with postgres_database.engine.begin() as conn:
+        metadata = MetaData()
+        await conn.run_sync(metadata.reflect)
+        tables = metadata.tables
+        await conn.execute(
+            tables["complaints"]
+            .insert()
+            .values(
+                id=complaint_id,
+                narrative="Synthetic reporting dispute",
+                cfpb_complaint_id="migration-1",
+                sentiment="negative",
+                urgency=4,
+                status="resolved",
+                **stamps,
+            )
         )
-        draft = Resolution(
-            complaint_id=complaint.id,
-            draft_text="Synthetic draft retained through upgrade",
-            guardrail_violations=[{"code": "fixture"}],
+        await conn.execute(
+            tables["users"]
+            .insert()
+            .values(
+                id=user_id,
+                email="migration@example.test",
+                full_name="Test reviewer",
+                hashed_password="unused",
+                **stamps,
+            )
         )
-        audit = AuditLog(user_id=user.id, event="migration_fixture")
-        session.add_all([label, draft, audit])
-        await session.commit()
+        await conn.execute(
+            tables["complaint_labels"]
+            .insert()
+            .values(
+                id=label_id,
+                complaint_id=complaint_id,
+                label_source="synthetic-test",
+                sentiment="negative",
+                intent="dispute_resolution",
+                urgency=4,
+                reasoning="Fixture, not model output",
+                key_entities=[],
+                labeled_at=now,
+                **stamps,
+            )
+        )
+        await conn.execute(
+            tables["resolutions"]
+            .insert()
+            .values(
+                id=draft_id,
+                complaint_id=complaint_id,
+                draft_text="Synthetic draft retained through upgrade",
+                guardrail_violations=[{"code": "fixture"}],
+                **stamps,
+            )
+        )
+        await conn.execute(
+            tables["audit_logs"]
+            .insert()
+            .values(
+                id=audit_id,
+                user_id=user_id,
+                event="migration_fixture",
+                created_at=now,
+            )
+        )
 
     await postgres_database.upgrade()
 
     async with sessions() as session:
-        restored = await session.get(Resolution, draft.id)
-        assert restored.complaint_id == complaint.id
-        assert restored.draft_text == draft.draft_text
+        restored = await session.get(Resolution, draft_id)
+        assert restored.complaint_id == complaint_id
+        assert restored.draft_text == "Synthetic draft retained through upgrade"
         assert restored.guardrail_violations == [{"code": "fixture"}]
-        assert (await session.get(ComplaintLabel, label.id)).complaint_id == complaint.id
-        assert (await session.get(AuditLog, audit.id)).user_id == user.id
-        session.add(Resolution(complaint_id=complaint.id, version=1, draft_text="Duplicate"))
+        assert (await session.get(ComplaintLabel, label_id)).complaint_id == complaint_id
+        assert (await session.get(AuditLog, audit_id)).user_id == user_id
+        legacy = await session.get(Complaint, complaint_id)
+        assert legacy.classification_outcome == "legacy_unknown"
+        assert legacy.classification_source is None
+        assert legacy.classified_at is None
+        assert legacy.classification_attempted_at is None
+        assert (legacy.sentiment, legacy.urgency, legacy.status) == ("negative", 4, "resolved")
+        # Changing the default must never promote/demote an existing account.
+        assert (await session.get(User, user_id)).role == "analyst"
+        session.add(Resolution(complaint_id=complaint_id, version=1, draft_text="Duplicate"))
         with pytest.raises(IntegrityError) as caught:
             await session.commit()
         assert caught.value.orig.sqlstate == "23505"

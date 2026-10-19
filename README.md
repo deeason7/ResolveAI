@@ -52,10 +52,12 @@ this diagram is not a guarantee of atomic enqueueing or lossless processing.
 Worker replay and stale-result handling need further protection.
 
 Local inference requires an installed compatible model. Both production environment
-examples set `LLM_SKIP_LOCAL=true`, using cloud inference by default. At the
-2026-10-17 reviewed baseline, total provider failure produces a deterministic
-urgency-3 fallback which can be stored as classified; it is not an escalated
-prediction. [Architecture and limits](docs/architecture.md) explain these boundaries.
+examples set `LLM_SKIP_LOCAL=true`, using cloud inference by default. Total
+provider failure now records classification as unavailable, with unknown urgency
+for new cases and visible manual-triage work. Prior labels survive failed
+reclassification but are marked stale; automatic drafting is blocked. Legacy
+provenance stays unknown. [Architecture and limits](docs/architecture.md) explain
+these boundaries and the remaining manual-editing and job-reliability work.
 
 ## Dashboard
 

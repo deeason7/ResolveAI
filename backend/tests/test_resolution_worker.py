@@ -19,7 +19,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.llm_log import LLMLog
 from app.models.resolution import GuardrailStatus, Resolution
 from app.schemas.agent import DraftedResponse
@@ -170,6 +170,23 @@ async def _get_resolutions(factory, cid) -> list[Resolution]:
 
 
 class TestProcessMessage:
+    @pytest.mark.parametrize("stale", [False, True])
+    async def test_outage_or_stale_labels_do_not_run_agent(self, redis_client, factory, stale):
+        cid = await _seed(
+            factory,
+            classification_outcome=(
+                ClassificationState.succeeded if stale else ClassificationState.unavailable
+            ),
+            classification_stale=stale,
+        )
+        agent_factory = _stub_factory(_result())
+        w = _worker(redis_client, factory, None, agent_factory=agent_factory)
+        await w.process_message({"complaint_id": str(cid)})
+        assert agent_factory.calls == []
+        async with factory() as s:
+            assert (await s.exec(select(Resolution))).all() == []
+            assert (await s.get(Complaint, cid)).status == ComplaintStatus.escalated
+
     async def test_passed_draft_persists_and_marks_draft_ready(self, redis_client, factory):
         cid = await _seed(factory)
         af = _stub_factory(_result())

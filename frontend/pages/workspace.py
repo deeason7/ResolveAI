@@ -22,7 +22,7 @@ def _stage_board(board: dict) -> None:
     st.subheader("Pipeline")
     cols = st.columns(5)
     cols[0].metric("Queued", f"{board['pending']:,}", help="Awaiting classification")
-    cols[1].metric("Classified", f"{board['classified']:,}", help="Low priority — no action needed")
+    cols[1].metric("Classified", f"{board['classified']:,}", help="Classification recorded")
     cols[2].metric(
         "In resolution",
         f"{board['escalated'] + board['agent_triggered']:,}",
@@ -34,6 +34,16 @@ def _stage_board(board: dict) -> None:
         help=f"draft ready {board['draft_ready']:,} + agent failed {board['needs_review']:,}",
     )
     cols[4].metric("Resolved", f"{board['resolved']:,}", help="Human approved — closed")
+    st.metric(
+        "Classification unavailable — needs triage",
+        f"{board['classification_unavailable']:,}",
+        help="These cases overlap lifecycle counts above; unavailability is not an urgency prediction.",
+    )
+    if board["classification_unavailable"]:
+        st.warning(
+            "Review unavailable classifications in the Triage Queue using the Needs triage filter. "
+            "Existing labels, if present, are marked stale."
+        )
 
 
 def _stream_row(label: str, info: dict) -> None:
@@ -84,8 +94,8 @@ st.caption(
 st.divider()
 st.subheader("Add work")
 st.caption(
-    "Start small — the cloud LLM's free tier rate-limits large bursts, which the worker "
-    "absorbs as fail-closed (max-severity) results. Batches of ~10 classify cleanly."
+    "Start with a small batch. If classification providers fail, cases remain visible as "
+    "unavailable and need manual triage. No urgency or response draft is inferred from the failure."
 )
 demo = api_client.is_demo()
 left, right = st.columns(2)

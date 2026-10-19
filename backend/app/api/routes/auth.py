@@ -9,19 +9,25 @@ Token lifecycle:
   GET  /me        → returns the calling user's profile
 """
 
+import hmac
 import logging
+import math
+import time
 import uuid
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Cookie, Depends, HTTPException, Request, Response, status
+from redis.exceptions import RedisError
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
+from starlette.concurrency import run_in_threadpool
 
 from app.config import settings
 from app.core.deps import ensure_demo_is_viewer, get_current_user, get_redis
 from app.core.security import (
     create_access_token,
     create_refresh_token,
+    credential_fingerprint,
     decode_refresh_token,
     hash_ip,
     hash_password,
@@ -40,6 +46,7 @@ from app.schemas.auth import (
     TokenResponse,
     UserPublic,
 )
+from app.services.auth_rate_limit import check_account_limit
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -59,24 +66,17 @@ def _blocklist_key(token: str) -> str:
     return f"{REFRESH_BLOCKLIST_PREFIX}{hash_token(token)}"
 
 
-async def _is_revoked(r: aioredis.Redis, token: str) -> bool:
-    """True if this refresh token has been revoked.
-
-    Checks the legacy raw-token key as well: entries written before the switch
-    to hashed keys are still live for up to the refresh TTL, and a revoked token
-    silently becoming valid again is the one outcome worth a second lookup.
-    """
-    if await r.exists(_blocklist_key(token)):
-        return True
-    return bool(await r.exists(f"{REFRESH_BLOCKLIST_PREFIX}{token}"))
-
-
-async def _revoke(r: aioredis.Redis, token: str) -> None:
-    await r.setex(
-        _blocklist_key(token),
-        settings.refresh_token_expire_days * 86400,
-        "revoked",
-    )
+async def _consume(r: aioredis.Redis, token: str, payload: dict) -> bool:
+    """One Redis command elects one refresh winner and retains spent state to expiry."""
+    remaining = math.ceil(payload["exp"] - time.time())
+    if remaining <= 0:
+        raise HTTPException(401, "Invalid refresh token")
+    try:
+        return bool(await r.set(_blocklist_key(token), "revoked", nx=True, ex=remaining))
+    except RedisError:
+        # A timeout might follow a successful SET. Never issue a replacement
+        # when its result is unknown; the user may need to sign in again.
+        raise HTTPException(503, "Authentication service temporarily unavailable") from None
 
 
 def _set_refresh_cookie(response: Response, token: str) -> None:
@@ -116,6 +116,7 @@ async def register(
     request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
+    r: aioredis.Redis = Depends(get_redis),
 ) -> TokenResponse:
     """Create a viewer when public registration is enabled."""
     if not settings.registration_enabled:
@@ -128,6 +129,7 @@ async def register(
             status_code=status.HTTP_403_FORBIDDEN,
             detail="The demo account must be provisioned by an administrator",
         )
+    await check_account_limit(r, str(body.email))
     existing = await session.exec(select(User).where(User.email == body.email))
     if existing.first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -135,7 +137,7 @@ async def register(
     user = User(
         email=body.email,
         full_name=body.full_name,
-        hashed_password=hash_password(body.password),
+        hashed_password=await run_in_threadpool(hash_password, body.password),
         role=UserRole.viewer,
     )
     session.add(user)
@@ -144,7 +146,7 @@ async def register(
     await _audit(session, request, user.id, "register")
 
     access = create_access_token(str(user.id), user.role.value)
-    refresh = create_refresh_token(str(user.id))
+    refresh = create_refresh_token(str(user.id), user.hashed_password)
     _set_refresh_cookie(response, refresh)
 
     logger.info("New user registered: %s", user.email)
@@ -161,8 +163,10 @@ async def login(
     request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
+    r: aioredis.Redis = Depends(get_redis),
 ) -> TokenResponse:
     """Authenticate and return tokens."""
+    await check_account_limit(r, str(body.email))
     result = await session.exec(select(User).where(User.email == body.email))
     user = result.first()
 
@@ -170,7 +174,9 @@ async def login(
     # `user is None or not verify_password(...)` would short-circuit, and the
     # ~180ms gap between "no such email" and "wrong password" is a readable
     # account-enumeration oracle over the network.
-    if not verify_password_or_dummy(body.password, user.hashed_password if user else None):
+    if not await run_in_threadpool(
+        verify_password_or_dummy, body.password, user.hashed_password if user else None
+    ):
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
@@ -180,7 +186,7 @@ async def login(
     await _audit(session, request, user.id, "login")
 
     access = create_access_token(str(user.id), user.role.value)
-    refresh = create_refresh_token(str(user.id))
+    refresh = create_refresh_token(str(user.id), user.hashed_password)
     _set_refresh_cookie(response, refresh)
 
     logger.info("User logged in: %s", user.email)
@@ -207,9 +213,6 @@ async def refresh(
             status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid refresh token"
         )
 
-    if await _is_revoked(r, refresh_token):
-        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Token revoked")
-
     subject = token_subject(payload)
     if subject is None:
         raise HTTPException(
@@ -222,11 +225,18 @@ async def refresh(
 
     ensure_demo_is_viewer(user)
 
-    new_access = create_access_token(str(user.id), user.role)
-    new_refresh = create_refresh_token(str(user.id))
+    credential = payload.get("credential")
+    if not isinstance(credential, str) or not hmac.compare_digest(
+        credential, credential_fingerprint(user.hashed_password)
+    ):
+        raise HTTPException(401, "Session expired; sign in again")
 
-    # Rotate: revoke old, issue new
-    await _revoke(r, refresh_token)
+    if not await _consume(r, refresh_token, payload):
+        raise HTTPException(401, "Token revoked")
+
+    new_access = create_access_token(str(user.id), user.role)
+    new_refresh = create_refresh_token(str(user.id), user.hashed_password)
+
     _set_refresh_cookie(response, new_refresh)
 
     return TokenResponse(access_token=new_access)
@@ -240,17 +250,26 @@ async def logout(
     request: Request,
     response: Response,
     session: AsyncSession = Depends(get_session),
-    current_user: User = Depends(get_current_user),
     r: aioredis.Redis = Depends(get_redis),
     refresh_token: str | None = Cookie(default=None, alias=REFRESH_COOKIE),
 ) -> None:
     """Revoke the refresh token and clear the cookie."""
-    if refresh_token:
-        await _revoke(r, refresh_token)
+    # Logout remains available after access expiry and account disabling.
+    # Invalid/legacy cookies need only be cleared: refresh rejects them already.
+    payload = decode_refresh_token(refresh_token) if refresh_token else None
+    if payload is not None and payload.get("type") == "refresh":
+        await _consume(r, refresh_token, payload)
+        subject = token_subject(payload)
+        if subject is not None and await session.get(User, subject) is not None:
+            await _audit(session, request, subject, "logout")
 
-    response.delete_cookie(key=REFRESH_COOKIE, path="/api/v1/auth")
-    await _audit(session, request, current_user.id, "logout")
-    logger.info("User logged out: %s", current_user.email)
+    response.delete_cookie(
+        key=REFRESH_COOKIE,
+        path="/api/v1/auth",
+        secure=settings.environment != "development",
+        httponly=True,
+        samesite="lax",
+    )
 
 
 # ── Me ────────────────────────────────────────────────────────────────────────

@@ -128,7 +128,13 @@ def get_default_redis() -> aioredis.Redis:
     Lives here rather than a service module because there's no domain logic to
     wrap — it IS just the client. Closed by the app's lifespan on shutdown.
     """
-    return aioredis.from_url(settings.redis_url, decode_responses=True)
+    return aioredis.from_url(
+        settings.redis_url,
+        decode_responses=True,
+        socket_connect_timeout=3,
+        socket_timeout=3,
+        retry_on_timeout=False,
+    )
 
 
 def get_redis() -> aioredis.Redis:

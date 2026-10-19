@@ -27,6 +27,19 @@ class TestEstimateCost:
 
 
 class TestBuildLog:
+    def test_unknown_attempt_usage_does_not_become_zero_cost(self):
+        log = LLMOpsTracker().build_log(
+            operation="classify_unavailable",
+            provider="none",
+            model="none",
+            prompt_tokens=None,
+            completion_tokens=None,
+            latency_ms=1234,
+            was_fallback=False,
+        )
+        assert log.prompt_tokens is log.completion_tokens is log.cost_usd is None
+        assert log.latency_ms == 1234
+
     def test_ollama_is_free_even_if_model_priced(self):
         log = LLMOpsTracker().build_log(
             operation="classify",

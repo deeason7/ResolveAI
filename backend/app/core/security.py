@@ -26,14 +26,22 @@ logger = logging.getLogger(__name__)
 # ── Password hashing ──────────────────────────────────────────────────────────
 
 
+def password_bytes(plain: str) -> bytes:
+    """Reject bcrypt's truncation boundary before either hashing or verification."""
+    encoded = plain.encode("utf-8")
+    if len(encoded) > 72:
+        raise ValueError("Passwords must not exceed 72 UTF-8 bytes")
+    return encoded
+
+
 def hash_password(plain: str) -> str:
     """Hash a plain-text password with bcrypt (cost factor 12)."""
-    return bcrypt.hashpw(plain.encode(), bcrypt.gensalt(rounds=12)).decode()
+    return bcrypt.hashpw(password_bytes(plain), bcrypt.gensalt(rounds=12)).decode()
 
 
 def verify_password(plain: str, hashed: str) -> bool:
     """Return True if plain matches the bcrypt hash."""
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
+    return bcrypt.checkpw(password_bytes(plain), hashed.encode())
 
 
 # A hash of a random string nobody holds the password for. Login verifies
@@ -54,10 +62,11 @@ def verify_password_or_dummy(plain: str, hashed: str | None) -> bool:
         True only if hashed is present and matches. A None hash always returns
         False — after doing the bcrypt work anyway.
     """
+    encoded = password_bytes(plain)
     if hashed is None:
-        bcrypt.checkpw(plain.encode(), _ABSENT_USER_HASH.encode())
+        bcrypt.checkpw(encoded, _ABSENT_USER_HASH.encode())
         return False
-    return bcrypt.checkpw(plain.encode(), hashed.encode())
+    return bcrypt.checkpw(encoded, hashed.encode())
 
 
 # ── JWT helpers ───────────────────────────────────────────────────────────────
@@ -79,10 +88,24 @@ def create_access_token(user_id: str, role: str) -> str:
     )
 
 
-def create_refresh_token(user_id: str) -> str:
-    """Create a long-lived refresh JWT."""
+def credential_fingerprint(hashed_password: str) -> str:
+    """Bind refresh sessions to credentials without exposing the bcrypt hash."""
+    return hmac.new(
+        settings.jwt_refresh_secret_key.encode(),
+        f"refresh-credential:{hashed_password}".encode(),
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def create_refresh_token(user_id: str, hashed_password: str) -> str:
+    """Create an independently rotatable refresh JWT, including within one second."""
     return _make_token(
-        {"sub": user_id, "type": "refresh"},
+        {
+            "sub": user_id,
+            "type": "refresh",
+            "jti": uuid.uuid4().hex,
+            "credential": credential_fingerprint(hashed_password),
+        },
         settings.jwt_refresh_secret_key,
         timedelta(days=settings.refresh_token_expire_days),
     )
@@ -101,12 +124,25 @@ def decode_access_token(token: str) -> dict | None:
 
 
 def decode_refresh_token(token: str) -> dict | None:
-    """Decode and validate a refresh token. Returns None on any failure."""
+    """Reject legacy sessions and malformed claims before touching session state."""
     try:
-        return jwt.decode(
-            token, settings.jwt_refresh_secret_key, algorithms=[settings.jwt_algorithm]
+        payload = jwt.decode(
+            token,
+            settings.jwt_refresh_secret_key,
+            algorithms=[settings.jwt_algorithm],
+            options={"require": ["exp", "sub", "jti", "credential"]},
         )
-    except jwt.InvalidTokenError:
+        uuid.UUID(payload["jti"])
+        fingerprint = payload["credential"]
+        if (
+            type(payload["exp"]) is not int
+            or not isinstance(fingerprint, str)
+            or not fingerprint.isascii()
+            or len(fingerprint) != 64
+        ):
+            return None
+        return payload
+    except (jwt.InvalidTokenError, ValueError, TypeError, AttributeError):
         return None
 
 

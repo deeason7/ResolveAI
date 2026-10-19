@@ -29,7 +29,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.core.deps import get_current_user, get_redis, require_admin, require_writer
 from app.database import get_session
-from app.models.complaint import Complaint, ComplaintStatus
+from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.user import User
 from app.schemas.complaint import (
     BulkImportRequest,
@@ -113,6 +113,7 @@ async def triage_queue(
     session: AsyncSession = Depends(get_session),
     _: User = Depends(get_current_user),
     status_: ComplaintStatus | None = Query(default=None, alias="status"),
+    classification_outcome: ClassificationState | None = Query(default=None),
     sentiment: str | None = Query(default=None, max_length=50),
     urgency_min: int | None = Query(default=None, ge=1, le=5),
     urgency_max: int | None = Query(default=None, ge=1, le=5),
@@ -136,6 +137,8 @@ async def triage_queue(
         )
 
     conditions = []
+    if classification_outcome is not None:
+        conditions.append(Complaint.classification_outcome == classification_outcome)
     if status_ is not None:
         conditions.append(Complaint.status == status_)
     else:
