@@ -1,117 +1,80 @@
-# Demo script — the 10-minute walkthrough
+# Demo script
 
-A run-of-show for demoing ResolveAI live (interview, screen-share, or
-hallway). Two acts: the guided tour sells the product, the live pipeline
-sells the engineering.
+Demonstrate observable behavior with public records and synthetic intake. Explain
+what a screen proves and where the implementation still needs work. See
+[product scope](product_scope.md) for the initial reviewer hypothesis.
 
-## Pre-flight (2 minutes, before anyone is watching)
+## Pre-flight
+
+Use a disposable local environment for write demonstrations. Verify an explicitly
+provisioned staff account and a separate viewer account before presenting. A viewer
+must not be able to write through the API, even if it bypasses the UI.
 
 ```bash
-docker compose up -d          # 7/7 healthy
-# start both workers (they're on-demand processes, not always-on services):
+docker compose up -d
 docker compose exec -d api python -m app.workers.classification_worker
 docker compose exec -d api python -m app.workers.resolution_worker
 ```
 
-- Check `http://localhost:8511` loads and `http://localhost:8010/docs` answers.
-- Have a signed-in browser tab ready (your own account, not the demo user —
-  you'll need the write buttons).
-- A `GROQ_API_KEY` in `.env` (or the local GGUF loaded in Ollama) so
-  classification has a brain.
+Check the dashboard at `http://localhost:8511` and API docs at
+`http://localhost:8010/api/docs`. Confirm the selected provider: production examples
+skip local inference, while local Ollama requires the exported model. A live model
+call may use external quota or incur cost; do not demonstrate with personal data.
 
-## Act 1 — the guided tour (3 minutes)
+## Read-only walkthrough
 
-Open the site logged out. **Point at the demo card** — "recruiters don't
-register, so the login page leads with a read-only guided tour." Click
-**Launch the demo** and let the tour boxes do the talking:
+1. **Dashboard:** show the loaded record count and date range. Imported records
+   are not evidence of classification, drafted responses, or resolved cases.
+2. **Triage:** inspect ordering, filters, unscored cases, and an original narrative.
+   Compare the proposed priority with the actual text rather than asserting it is
+   correct because a model assigned it.
+3. **Complaint detail:** show similar public complaints and their response
+   categories. These are context, not verified successful resolutions.
+4. **Analytics and graph:** explain that company scores and reference links are
+   derived signals; do not present them as legal or causal findings.
+5. **Observatory:** inspect logged calls and their provider. Explain incomplete
+   failure/cost coverage before interpreting a total.
 
-1. **Dashboard** — 200K real CFPB complaints; cards anchor to the data's own
-   clock; the donut shows *unclassified* honestly.
-2. **Triage Queue** — priority-ordered worklist, all server-side.
-3. **Complaint Detail** (open one from triage) — narrative, classification,
-   similar complaints with historical outcomes.
-4. **Analytics → Graph Explorer → Observatory** — fast flip through; open
-   the sidebar's **🛠️ Under the hood** on one page: "every page documents
-   its own architecture decisions."
+The public demo's hosting and account state must be verified for the revision
+being presented. A source-code change alone does not update a hosted deployment.
 
-Exit demo, sign in as yourself.
+## Synthetic staff workflow
 
-## Act 2 — the live pipeline (5 minutes)
-
-### Submit a complaint (via `/docs`, which shows off the API)
-
-Authorize in Swagger with your bearer token (login response), then
-`POST /api/v1/complaints/` with the showpiece:
+Submit this through `POST /api/v1/complaints/` using a staff bearer token:
 
 ```json
 {
-  "narrative": "My car was repossessed last night even though I have bank records proving every payment cleared on time. I called four times this week and was hung up on twice. I work night shifts and now have no way to get to my job. I am desperate and about to lose my income over your bank's accounting error.",
-  "product": "Vehicle loan or lease",
-  "issue": "Repossession",
-  "company": "BigBank Auto Finance",
-  "state": "OH"
-}
-```
-
-Spares, if you want contrast:
-
-```json
-{
-  "narrative": "There is an account on my credit report I never opened. I filed a dispute thirty days ago and have heard nothing back. I need this investigated and removed because it is dragging my score down while I am trying to qualify for a mortgage.",
+  "narrative": "This is a synthetic demonstration. Alex Example found an unfamiliar account on a credit report and asks Example Credit Bureau to investigate. The example includes no real account number or identifying documents.",
   "product": "Credit reporting, credit repair services, or other personal consumer reports",
   "issue": "Incorrect information on your report",
-  "company": "Equifax",
+  "company": "Example Credit Bureau",
   "state": "GA"
 }
 ```
 
-```json
-{
-  "narrative": "I noticed a small maintenance fee on my statement this month that I do not remember being told about when I opened the account. Could someone explain what it covers and whether there is an account type without it?",
-  "product": "Checking or savings account",
-  "issue": "Fees or interest",
-  "company": "BigBank",
-  "state": "CA"
-}
-```
+Record the case ID, then:
 
-### Narrate the pipeline (~30s of waiting, fill it with the story)
+1. Watch the case enter the queue. Report observed completion and latency; do not
+   promise a classification or a fixed response time in advance.
+2. Inspect the narrative and classification together. If no provider answered,
+   describe the failure instead of presenting the deterministic fallback as a
+   prediction. The reviewed baseline uses urgency 3, not maximum severity.
+3. Request a draft. Inspect tool results, proposed text and check outcomes. A
+   citation-title match does not verify the law or support every sentence.
+4. Reject an unsupported promise with concrete feedback and inspect the new text.
+   The editable draft box is currently for copy-out: edits are not saved.
+5. Before any approval, compare the visible and stored draft. Exact revision
+   approval is an outstanding integrity requirement. Do not demonstrate this
+   baseline as suitable for real customer decisions.
+6. Explain that the application's `resolved` label currently records approval.
+   Delivery, remediation and customer satisfaction have not been measured.
 
-"The API committed the row and queued a stream message — Postgres is the
-truth, Redis is just the signal. The worker picks it up, tries the local
-fine-tuned 3B first, falls back to Groq, and if *nothing* answers it
-fail-closes to maximum severity — the system never guesses silently."
+## Failure demonstration and cleanup
 
-### Show the results
+Use controlled local provider stubs or a deliberately isolated test configuration
+for failure scenarios. The current Redis publication and replay paths have known
+transaction gaps; describe those rather than promising lossless recovery.
 
-1. **Triage Queue** — the repossession lands high: extreme negative, urgency
-   5, priority near the top. The fee question (if submitted) sits far below.
-2. **Open detail** — classification chips; **similar complaints** panel:
-   "cosine search over 200K embedded narratives, ~140ms, each neighbor shows
-   how it was historically resolved."
-3. **Generate resolution** — 202; ~15s later the draft appears (refresh).
-   Walk the panel top to bottom: agent chain-of-thought (tools it called,
-   what came back), **four guardrail layers** each with a verdict, the
-   draft citing regulations the graph actually returned.
-4. **Reject with feedback** — type something opinionated: *"Too apologetic,
-   and do not promise the repossession will be reversed — commit only to an
-   investigation with a named timeline."* The v2 draft incorporates it —
-   "human feedback enters the same regeneration path as guardrail
-   violations."
-5. **Approve v2** — complaint flips to resolved.
-6. **LLMOps Observatory** — the calls you just caused are already in the
-   spend chart and latency bars: "telemetry is written in the same
-   transaction as the work; this page can't lie."
-
-## If asked "what happens when the LLM is down?"
-
-Don't hand-wave — show the receipts: Observatory → routing donut → the red
-`none` slice. "Sixteen real fail-closed events from a rate-limit storm
-during development: every one flagged maximum severity for human review.
-The failure path isn't theoretical; it's logged."
-
-## Reset between demos
-
-Approve or reject any drafts you created, and your submitted complaints are
-real rows — either keep them (they make the queue livelier) or delete the
-synthetic companies via SQL if you want the corpus pristine.
+Keep synthetic case IDs with the demo notes. Do not delete rows by a broad company
+name selector or approve a draft merely to tidy a demo. Reset only an explicitly
+disposable environment after confirming that no real work is stored there.

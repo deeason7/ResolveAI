@@ -22,86 +22,84 @@ STEPS = [
         "page": "dashboard",
         "file": "pages/dashboard.py",
         "title": "Welcome to ResolveAI",
-        "body": "A backlog of **200,000 real consumer complaints**, turned into a "
-        "prioritized, explainable workflow — AI drafts responses in seconds, "
-        "a human approves every word.",
+        "body": "Explore public consumer complaints, inspect suggested priorities, and "
+        "review generated responses. Imported cases, drafts, and approvals are "
+        "different measures of work.",
         "try": "Press **Next** to walk through, or just wander — the tour follows you.",
     },
     {
         "page": "dashboard",
         "file": "pages/dashboard.py",
         "title": "The operations pulse",
-        "body": "Volume, customer mood, urgency hot spots, and the companies driving "
-        "risk — the picture an operations lead checks every morning.",
+        "body": "See loaded complaint volume, assigned sentiment, and urgency by product. "
+        "These are signals to inspect, not verified findings about a company.",
         "try": "Switch the donut window, or pick a different reference date under the cards.",
     },
     {
         "page": "triage_queue",
         "file": "pages/triage_queue.py",
         "title": "The morning worklist",
-        "body": "Most damaging complaints first, so teams spend minutes deciding what "
-        "matters instead of hours reading. Filters answer *“show me urgent "
-        "cases at company X”* instantly.",
+        "body": "Sort and filter complaints by their recorded priority. Read the original "
+        "narrative before relying on a model's urgency judgment.",
         "try": "Select any row, then hit **🔍 Open detail**.",
     },
     {
         "page": "complaint_detail",
         "file": "pages/complaint_detail.py",
         "title": "One complaint, full context",
-        "body": "The customer's own words, how the AI read them, and how similar cases "
-        "were actually resolved before — precedent on tap instead of tribal memory.",
+        "body": "Read the complaint, its classification, and similar public records. "
+        "Historical response categories do not prove that a customer's problem "
+        "was solved.",
         "try": "Toggle **Same product only**, or jump into a similar case with **Open**.",
     },
     {
         "page": "complaint_detail",
         "file": "pages/complaint_detail.py",
         "title": "Draft → check → human",
-        "body": "An agent writes a regulation-aware draft, four guardrails vet it, and a "
-        "reviewer approves it or sends it back with feedback the AI must address. "
-        "Days of response time become minutes — accountability stays human.",
-        "try": "Expand **Agent chain of thought** to watch it show its work.",
+        "body": "Inspect a generated draft, its source context, and recorded checks. "
+        "Pattern checks and tone scores do not establish factual or legal accuracy; "
+        "approval does not establish delivery or resolution.",
+        "try": "Expand **Agent chain of thought** to inspect the tool/workflow trace.",
     },
     {
         "page": "analytics",
         "file": "pages/analytics.py",
         "title": "The leadership view",
-        "body": "Trends, product hot spots, and a company risk scorecard — the view for "
-        "deciding where to put people, process, and pressure.",
+        "body": "Compare trends and product counts with graph-derived company scores. "
+        "Check each column's source and coverage before drawing conclusions.",
         "try": "Click a column header to sort the scorecard.",
     },
     {
         "page": "graph_explorer",
         "file": "pages/graph_explorer.py",
         "title": "Institutional memory, drawn",
-        "body": "Companies, products, issues, and regulations as one connected map — the "
-        "same map the AI consults when it cites a rule in a draft.",
+        "body": "Explore companies, products, issues, and seeded reference material. "
+        "A graph link alone does not establish that a rule applies to a complaint.",
         "try": "Search any company, pick a node, and **🧭 Explore from here**.",
     },
     {
         "page": "workspace",
         "file": "pages/workspace.py",
         "title": "The engine room",
-        "body": "Every complaint rides one line — queued → classified → in resolution → "
-        "human review → resolved — and this board shows how many sit at each stage right "
-        "now. It doubles as the control panel: feed a batch in and watch the counts move.",
-        "try": "Watch the **Pipeline** row — each case sits at exactly one stage. "
-        "(Enqueueing is read-only in the demo.)",
+        "body": "Inspect recorded case states and available worker information. "
+        "The current resolved label records approval, not a verified customer outcome.",
+        "try": "Compare the **Pipeline** counts with the queue; staff controls require "
+        "write access.",
     },
     {
         "page": "llmops",
         "file": "pages/llmops.py",
-        "title": "AI you can govern",
-        "body": "What the AI costs (this entire corpus: about **three cents**), how fast "
-        "it answers, and receipts that it fails safe — every blocked draft and "
-        "fallback is on the record.",
-        "try": "Hover the routing donut — red means *the AI refused to guess*.",
+        "title": "Inspect recorded model activity",
+        "body": "Explore logged calls, estimated cost, latency, and violations. "
+        "This is incomplete call telemetry, not a total operating-cost or safety report.",
+        "try": "Hover the routing donut — provider none means no model produced that result.",
     },
     {
         "page": "llmops",
         "file": "pages/llmops.py",
         "title": "That's ResolveAI",
-        "body": "Explainable triage, guarded drafts, humans in charge. Keep playing — "
-        "everything here is safe to click. Curious how it's built? Open "
+        "body": "This prototype helps inspect complaint data and proposed responses. "
+        "For implementation details and known limits, open "
         "**🛠️ Under the hood** in the sidebar on any page.",
         "try": None,
     },

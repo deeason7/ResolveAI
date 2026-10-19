@@ -15,24 +15,67 @@ from pathlib import Path
 
 # Generate a unique sqlite file per test process
 _DB_PATH = Path(tempfile.gettempdir()) / f"resolveai_test_{os.getpid()}.db"
-TEST_DATABASE_URL = f"sqlite+aiosqlite:///{_DB_PATH}"
+UNIT_DATABASE_URL = f"sqlite+aiosqlite:///{_DB_PATH}"
 
-os.environ["DATABASE_URL"] = TEST_DATABASE_URL
-os.environ.setdefault("REDIS_URL", "redis://localhost:6379/1")
-os.environ.setdefault("NEO4J_URI", "bolt://localhost:7687")
-os.environ.setdefault("NEO4J_PASSWORD", "test")
-os.environ.setdefault("JWT_SECRET_KEY", "test-secret-key-that-is-long-enough-32chars")
-os.environ.setdefault("JWT_REFRESH_SECRET_KEY", "test-refresh-key-that-is-long-enough-32c")
-os.environ.setdefault("ENVIRONMENT", "test")
+# The app singleton always belongs to the unit suite. PostgreSQL fixtures use
+# TEST_DATABASE_URL directly and never reuse this engine or DATABASE_URL.
+# Never inherit a developer's production service settings or provider keys.
+# TEST_DATABASE_URL is deliberately left alone for the guarded PG fixtures.
+os.environ.update(
+    DATABASE_URL=UNIT_DATABASE_URL,
+    DB_REQUIRE_SSL="false",
+    REDIS_URL="redis://127.0.0.1:1/1",
+    NEO4J_URI="bolt://127.0.0.1:1",
+    NEO4J_PASSWORD="test",
+    QDRANT_URL="",
+    QDRANT_HOST="127.0.0.1",
+    QDRANT_PORT="1",
+    QDRANT_API_KEY="",
+    OLLAMA_BASE_URL="http://127.0.0.1:1",
+    GROQ_API_KEY="",
+    OPENAI_API_KEY="",
+    JWT_SECRET_KEY="test-secret-key-that-is-long-enough-32chars",
+    JWT_REFRESH_SECRET_KEY="test-refresh-key-that-is-long-enough-32c",
+    ENVIRONMENT="test",
+    PUBLIC_REGISTRATION_ENABLED="true",
+    DEMO_EMAIL="demo@resolveai-demo.com",
+)
 
 import fakeredis
 import fakeredis.aioredis
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
+from sqlalchemy import event
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
+
+from app.database import engine as _unit_engine
+
+
+@event.listens_for(_unit_engine.sync_engine, "connect")
+def _enable_sqlite_foreign_keys(connection, _record):
+    cursor = connection.cursor()
+    cursor.execute("PRAGMA foreign_keys=ON")
+    cursor.close()
+
+
+def pytest_addoption(parser):
+    parser.addoption(
+        "--run-postgres",
+        action="store_true",
+        help="Run destructive integration tests against an explicitly configured test database.",
+    )
+
+
+def pytest_collection_modifyitems(config, items):
+    if not config.getoption("--run-postgres"):
+        skip = pytest.mark.skip(reason="PostgreSQL integration tests require --run-postgres")
+        for item in items:
+            if "postgres" in item.keywords:
+                item.add_marker(skip)
+
 
 _fake_redis_server = fakeredis.FakeServer()
 

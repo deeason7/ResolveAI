@@ -26,6 +26,15 @@ logger = logging.getLogger(__name__)
 bearer_scheme = HTTPBearer(auto_error=False)
 
 
+def ensure_demo_is_viewer(user: User) -> None:
+    """Deny a misprovisioned public identity, including its existing tokens."""
+    if user.email.casefold() == settings.demo_email.casefold() and user.role != UserRole.viewer:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Demo account is unavailable until an administrator assigns viewer access",
+        )
+
+
 async def get_current_user(
     credentials: HTTPAuthorizationCredentials | None = Depends(bearer_scheme),
     session: AsyncSession = Depends(get_session),
@@ -64,6 +73,8 @@ async def get_current_user(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+
+    ensure_demo_is_viewer(user)
 
     return user
 

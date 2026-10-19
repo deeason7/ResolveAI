@@ -5,8 +5,32 @@ All notable changes to ResolveAI are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-Releases are cut from `main`; pushing a `v*` tag runs the full lint/test/image
-gate and ships the tagged commit to the hosted demo.
+Releases are cut from `main`; pushing a `v*` tag runs the reusable CI workflow
+and publishes through the deployment branch. The actual hosted image and
+post-deployment smoke gates remain separate work.
+
+## [Unreleased]
+
+### Security and recovery
+
+- Public registration creates viewers and is disabled by default outside
+  development/test. The public demo requires a provisioned viewer; automatic
+  registration and use of a privileged demo account are rejected.
+- Added explicit dry-run account inventory, creation and role-change commands.
+  Existing staff accounts are not automatically modified.
+- Complete version 2 backups preserve complaints and related records in one
+  PostgreSQL snapshot. Restore verifies checksums/schema and requires an empty
+  target; conflicts roll back the operation. Legacy partial archives are rejected.
+
+### Verification and documentation
+
+- Added guarded PostgreSQL migration, integrity, concurrency and restore tests,
+  with a separate CI job. SQLite tests now enforce foreign keys.
+- Added demo-client contract tests and corrected unsupported model, recovery,
+  safety, cost and workflow claims. Historical model scores are explicitly
+  identified as contaminated-split results, not current quality evidence.
+- Documented account provisioning, recovery, and the unvalidated reviewer-workflow
+  hypothesis. This work has not been deployed by the local verification step.
 
 ## [1.4.1] — 2026-08-21
 

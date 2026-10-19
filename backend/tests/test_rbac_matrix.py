@@ -36,6 +36,27 @@ _ENDPOINTS = [
     ("reader", "GET", "/api/v1/workspace/board", {}),
     ("reader", "GET", "/api/v1/complaints/", {}),
     ("writer", "POST", "/api/v1/workspace/enqueue/classification", {"params": {"limit": 1}}),
+    ("writer", "POST", "/api/v1/workspace/enqueue/resolution", {"params": {"limit": 1}}),
+    (
+        "writer",
+        "POST",
+        "/api/v1/complaints/",
+        {
+            "json": {
+                "narrative": "The company charged a duplicate fee and has not answered my complaint.",
+            }
+        },
+    ),
+    ("writer", "POST", "/api/v1/resolutions/00000000-0000-0000-0000-000000000001/generate", {}),
+    ("writer", "POST", "/api/v1/resolutions/00000000-0000-0000-0000-000000000001/approve", {}),
+    (
+        "writer",
+        "POST",
+        "/api/v1/resolutions/00000000-0000-0000-0000-000000000001/reject",
+        {
+            "json": {"feedback": "Please correct the response with supported evidence."},
+        },
+    ),
     ("admin", "POST", "/api/v1/complaints/bulk-import", {"json": {"path": "/tmp/nope.csv"}}),
 ]
 
@@ -47,6 +68,22 @@ _ALLOWED = {
 }
 
 _ROLES = [UserRole.admin, UserRole.analyst, UserRole.viewer]
+
+
+def test_matrix_covers_every_business_mutation():
+    from fastapi.routing import APIRoute
+
+    from app.main import create_app
+
+    actual = {
+        (method, route.path.replace("{complaint_id}", "00000000-0000-0000-0000-000000000001"))
+        for route in create_app().routes
+        if isinstance(route, APIRoute) and not route.path.startswith("/api/v1/auth/")
+        for method in route.methods
+        if method in {"POST", "PUT", "PATCH", "DELETE"}
+    }
+    covered = {(method, url) for _, method, url, _ in _ENDPOINTS if method != "GET"}
+    assert actual == covered
 
 
 def _user(role: UserRole) -> SimpleNamespace:

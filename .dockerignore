@@ -12,6 +12,8 @@
 **/*.egg-info/
 .env
 .env.*
+backups/
+.streamlit/secrets.toml
 
 # Not part of the single-container API image (the API + workers live in backend/)
 frontend/

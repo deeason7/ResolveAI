@@ -18,7 +18,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.core.deps import get_current_user, get_redis
+from app.core.deps import ensure_demo_is_viewer, get_current_user, get_redis
 from app.core.security import (
     create_access_token,
     create_refresh_token,
@@ -32,8 +32,14 @@ from app.core.security import (
 from app.database import get_session
 from app.middleware.rate_limit import limiter
 from app.models.audit_log import AuditLog
-from app.models.user import User
-from app.schemas.auth import LoginRequest, RegisterRequest, TokenResponse, UserPublic
+from app.models.user import User, UserRole
+from app.schemas.auth import (
+    AuthCapabilities,
+    LoginRequest,
+    RegisterRequest,
+    TokenResponse,
+    UserPublic,
+)
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/auth", tags=["auth"])
@@ -97,6 +103,12 @@ async def _audit(session: AsyncSession, request: Request, user_id: "uuid.UUID", 
 # ── Register ──────────────────────────────────────────────────────────────────
 
 
+@router.get("/capabilities", response_model=AuthCapabilities)
+async def capabilities() -> AuthCapabilities:
+    """Publish only the sign-up capability needed by the unauthenticated UI."""
+    return AuthCapabilities(public_registration_enabled=settings.registration_enabled)
+
+
 @router.post("/register", response_model=TokenResponse, status_code=status.HTTP_201_CREATED)
 @limiter.limit(_CREDENTIAL_RATE_LIMIT)
 async def register(
@@ -105,7 +117,17 @@ async def register(
     response: Response,
     session: AsyncSession = Depends(get_session),
 ) -> TokenResponse:
-    """Create a new account and return an access token."""
+    """Create a viewer when public registration is enabled."""
+    if not settings.registration_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="Public registration is disabled; contact an administrator for access",
+        )
+    if str(body.email).casefold() == settings.demo_email.casefold():
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail="The demo account must be provisioned by an administrator",
+        )
     existing = await session.exec(select(User).where(User.email == body.email))
     if existing.first():
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail="Email already registered")
@@ -114,6 +136,7 @@ async def register(
         email=body.email,
         full_name=body.full_name,
         hashed_password=hash_password(body.password),
+        role=UserRole.viewer,
     )
     session.add(user)
     await session.flush()  # get the UUID before commit
@@ -151,6 +174,8 @@ async def login(
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid credentials")
     if not user.is_active:
         raise HTTPException(status_code=status.HTTP_403_FORBIDDEN, detail="Account disabled")
+
+    ensure_demo_is_viewer(user)
 
     await _audit(session, request, user.id, "login")
 
@@ -194,6 +219,8 @@ async def refresh(
     user = await session.get(User, subject)
     if user is None or not user.is_active:
         raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="User not found")
+
+    ensure_demo_is_viewer(user)
 
     new_access = create_access_token(str(user.id), user.role)
     new_refresh = create_refresh_token(str(user.id))

@@ -29,9 +29,8 @@ _TOKEN_KEY = "access_token"
 _USER_KEY = "user"
 _DEMO_KEY = "demo_mode"
 
-# Shared walk-up account for recruiters/visitors who won't register. Its
-# credentials are deliberately not secret — it can do nothing a self-registered
-# account couldn't, and the UI runs demo sessions read-only on top.
+# Public walk-up credentials require an administrator-provisioned viewer.
+# Both the backend and this client refuse an elevated demo identity.
 DEMO_EMAIL = os.environ.get("DEMO_EMAIL", "demo@resolveai-demo.com")
 DEMO_PASSWORD = os.environ.get("DEMO_PASSWORD", "demo-resolveai-2026")
 
@@ -164,6 +163,9 @@ def clear_session() -> None:
     # resets the guided tour (importing tour would be circular).
     for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step"):
         st.session_state.pop(key, None)
+    client = st.session_state.pop(_CLIENT_KEY, None)
+    if client is not None:
+        client.close()
 
 
 def is_demo() -> bool:
@@ -171,20 +173,20 @@ def is_demo() -> bool:
 
 
 def start_demo() -> None:
-    """Sign in as the shared demo account, creating it on first use.
-
-    Self-healing on a fresh database: login 401 → register → proceed. Anyone
-    could do the same through the open register endpoint, so this adds no new
-    surface — it just removes the form for people who only want to look.
-    """
+    """Use an existing viewer account; provisioning is an administrative task."""
+    clear_session()
     try:
         login(DEMO_EMAIL, DEMO_PASSWORD)
-    except ApiError as exc:
-        if exc.status_code != 401:
-            raise
-        register(DEMO_EMAIL, "Demo Viewer", DEMO_PASSWORD)
-        login(DEMO_EMAIL, DEMO_PASSWORD)
+        if (current_user() or {}).get("role") != "viewer":
+            raise ApiError(403, "Demo account must have viewer access; contact an administrator")
+    except ApiError:
+        clear_session()
+        raise
     st.session_state[_DEMO_KEY] = True
+
+
+def auth_capabilities() -> dict:
+    return _request("GET", "/auth/capabilities").json()
 
 
 def login(email: str, password: str) -> None:

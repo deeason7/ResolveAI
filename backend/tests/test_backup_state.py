@@ -1,14 +1,12 @@
-"""
-Tests for the state export/restore script.
+"""Complete backup tests on isolated SQLite, with FK enforcement.
 
-A backup nobody has restored is a guess, so these drive the round trip against
-a real (SQLite) database rather than asserting on the files alone: export,
-wipe, restore, compare. The script is loaded via importlib because `scripts/`
-isn't an installed package — the same approach test_label_prepare.py uses.
+PostgreSQL snapshot and real-migration recovery tests live in integration/.
+No fixture here loads production configuration or resets the application engine.
 """
 
 from __future__ import annotations
 
+import hashlib
 import importlib.util
 import json
 import sys
@@ -19,231 +17,261 @@ from pathlib import Path
 import pytest
 import pytest_asyncio
 import sqlalchemy as sa
-from sqlalchemy.ext.asyncio import async_sessionmaker
+from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
-SCRIPT_PATH = PROJECT_ROOT / "scripts" / "backup_state.py"
+SCRIPT_PATH = Path(__file__).resolve().parents[2] / "scripts" / "backup_state.py"
+spec = importlib.util.spec_from_file_location("backup_state", SCRIPT_PATH)
+backup_state = importlib.util.module_from_spec(spec)
+sys.modules[spec.name] = backup_state
+spec.loader.exec_module(backup_state)
 
 
-def _load_script():
-    spec = importlib.util.spec_from_file_location("backup_state", SCRIPT_PATH)
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["backup_state"] = mod
-    spec.loader.exec_module(mod)
-    return mod
-
-
-backup_state = _load_script()
-
-
-@pytest_asyncio.fixture()
-async def fresh_db():
-    import app.models  # noqa: F401 — registers tables
-    from app.database import engine
-
+@pytest_asyncio.fixture
+async def backup_engine(tmp_path):
+    engine = create_async_engine(f"sqlite+aiosqlite:///{tmp_path / 'backup-test.db'}")
     async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.drop_all)
+        await conn.execute(sa.text("PRAGMA foreign_keys=ON"))
         await conn.run_sync(SQLModel.metadata.create_all)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+        await conn.execute(sa.text("CREATE TABLE alembic_version (version_num VARCHAR(32))"))
+        await conn.execute(sa.text("INSERT INTO alembic_version VALUES ('test-schema-v1')"))
+    try:
+        yield engine
+    finally:
+        await engine.dispose()
 
 
-async def _seed(factory, *, users: int = 2, resolutions: int = 1) -> dict:
-    """Insert a user + complaint + resolution + llm_log + audit_log."""
+async def seed_rows(engine):
+    from app.models.audit_log import AuditLog
     from app.models.complaint import Complaint, ComplaintStatus
+    from app.models.complaint_label import ComplaintLabel
     from app.models.llm_log import LLMLog
-    from app.models.resolution import Resolution
-    from app.models.user import User
+    from app.models.resolution import GuardrailStatus, Resolution
+    from app.models.user import User, UserRole
 
-    ids: dict = {"users": [], "complaints": [], "resolutions": []}
-    async with factory() as s:
-        for i in range(users):
-            u = User(
-                email=f"backup{i}@example.com",
-                full_name=f"Backup {i}",
-                hashed_password="not-a-real-hash",
-            )
-            s.add(u)
-            ids["users"].append(u.id)
-
-        c = Complaint(
-            cfpb_complaint_id=f"BK-{uuid.uuid4().hex[:8]}",
-            narrative="They charged me twice for the same payment.",
-            product="Mortgage",
-            issue="Trouble during payment process",
-            company="ACME BANK",
-            state="TX",
-            status=ComplaintStatus.classified,
+    factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
+    async with factory() as session:
+        user = User(
+            email="reviewer@example.test",
+            full_name="Synthetic reviewer",
+            hashed_password="synthetic-not-a-password-hash",
+            role=UserRole.analyst,
         )
-        s.add(c)
-        await s.flush()
-        ids["complaints"].append(c.id)
-
-        for v in range(resolutions):
-            r = Resolution(
-                complaint_id=c.id,
-                version=v + 1,
-                draft_text="Draft text for the response.",
-                guardrail_violations=["structural"],
-            )
-            s.add(r)
-            ids["resolutions"].append(r.id)
-
-        s.add(
-            LLMLog(
-                complaint_id=c.id,
-                operation="classification",
-                model_used="openai/gpt-oss-120b",
-                provider="groq",
-                prompt_tokens=100,
-                completion_tokens=20,
-                latency_ms=350,
-                cost_usd=0.0001,
-                was_fallback=False,
-            )
+        historic = Complaint(
+            cfpb_complaint_id="synthetic-001",
+            narrative="Synthetic duplicate charge.",
+            status=ComplaintStatus.resolved,
+            sentiment="negative",
+            urgency=5,
+            company="Example Bank",
+            date_received=datetime(2026, 1, 2),
         )
-        await s.commit()
-    return ids
+        live = Complaint(narrative="Synthetic live submission.", status=ComplaintStatus.classified)
+        session.add_all([user, historic, live])
+        await session.flush()
+        session.add_all(
+            [
+                Resolution(
+                    complaint_id=historic.id,
+                    version=1,
+                    draft_text="Exact reviewed text — preserved.",
+                    guardrail_status=GuardrailStatus.passed,
+                    guardrail_violations=[],
+                ),
+                ComplaintLabel(
+                    complaint_id=historic.id,
+                    label_source="synthetic-fixture",
+                    sentiment="negative",
+                    intent="dispute",
+                    urgency=5,
+                    key_entities=[{"type": "company", "value": "Example Bank"}],
+                    reasoning="Synthetic label",
+                ),
+                LLMLog(
+                    complaint_id=live.id,
+                    operation="classification",
+                    model_used="stub",
+                    provider="stub",
+                    latency_ms=12,
+                ),
+                AuditLog(
+                    user_id=user.id,
+                    event="synthetic_review",
+                    metadata_={"case_id": str(historic.id), "revision": 1},
+                ),
+            ]
+        )
+        await session.commit()
+    return historic.id
 
 
-async def _count(factory, table_name: str) -> int:
-    async with factory() as s:
-        t = SQLModel.metadata.tables[table_name]
-        return await s.scalar(sa.select(sa.func.count()).select_from(t))
+async def dump_rows(engine):
+    async with engine.connect() as conn:
+        tables = await backup_state._tables(conn)
+        result = {}
+        for table in tables:
+            rows = (await conn.execute(sa.select(table).order_by(table.c.id))).mappings()
+            result[table.name] = [
+                {key: backup_state._to_json(value) for key, value in row.items()} for row in rows
+            ]
+        return result
 
 
-class TestExport:
-    async def test_writes_a_file_per_table_and_a_manifest(self, fresh_db, tmp_path):
-        await _seed(fresh_db)
-        manifest = await backup_state.export_state(tmp_path / "bk")
-
-        assert (tmp_path / "bk" / backup_state.MANIFEST_NAME).exists()
-        for name in ("users", "resolutions", "llm_logs", "audit_logs", "complaint_labels"):
-            assert (tmp_path / "bk" / f"{name}.jsonl").exists()
-        assert manifest["row_counts"]["users"] == 2
-        assert manifest["row_counts"]["resolutions"] == 1
-
-    async def test_skips_the_reproducible_corpus_by_default(self, fresh_db, tmp_path):
-        await _seed(fresh_db)
-        manifest = await backup_state.export_state(tmp_path / "bk")
-
-        assert "complaints" not in manifest["row_counts"]
-        assert not (tmp_path / "bk" / "complaints.jsonl").exists()
-        assert manifest["includes_complaints"] is False
-
-    async def test_includes_the_corpus_on_request(self, fresh_db, tmp_path):
-        await _seed(fresh_db)
-        manifest = await backup_state.export_state(tmp_path / "bk", include_complaints=True)
-
-        assert manifest["row_counts"]["complaints"] == 1
-        assert manifest["includes_complaints"] is True
-
-    async def test_rows_are_json_serialisable_with_types_flattened(self, fresh_db, tmp_path):
-        await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk")
-
-        line = (tmp_path / "bk" / "resolutions.jsonl").read_text().splitlines()[0]
-        row = json.loads(line)
-        uuid.UUID(row["id"])  # UUID survived as a parseable string
-        datetime.fromisoformat(row["created_at"])  # datetime survived as ISO-8601
-        assert row["guardrail_violations"] == ["structural"]  # JSON column kept its shape
+async def empty_rows(engine):
+    async with engine.begin() as conn:
+        for table in reversed(await backup_state._tables(conn)):
+            await conn.execute(sa.delete(table))
 
 
-class TestRoundTrip:
-    async def test_export_wipe_restore_recovers_every_row(self, fresh_db, tmp_path):
-        ids = await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk", include_complaints=True)
-
-        from app.database import engine
-
-        async with engine.begin() as conn:
-            await conn.run_sync(SQLModel.metadata.drop_all)
-            await conn.run_sync(SQLModel.metadata.create_all)
-        assert await _count(fresh_db, "users") == 0
-
-        await backup_state.restore_state(tmp_path / "bk")
-
-        assert await _count(fresh_db, "users") == 2
-        assert await _count(fresh_db, "complaints") == 1
-        assert await _count(fresh_db, "resolutions") == 1
-        assert await _count(fresh_db, "llm_logs") == 1
-
-        async with fresh_db() as s:
-            from app.models.user import User
-
-            restored = await s.get(User, ids["users"][0])
-            assert restored is not None
-            assert restored.email == "backup0@example.com"
-            assert restored.role.value == "analyst"
-
-    async def test_restore_is_idempotent(self, fresh_db, tmp_path):
-        await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk", include_complaints=True)
-
-        await backup_state.restore_state(tmp_path / "bk")
-        await backup_state.restore_state(tmp_path / "bk")
-
-        assert await _count(fresh_db, "users") == 2  # not 4
-
-    async def test_restore_never_overwrites_a_live_row(self, fresh_db, tmp_path):
-        ids = await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk")
-
-        from app.models.user import User
-
-        async with fresh_db() as s:
-            u = await s.get(User, ids["users"][0])
-            u.full_name = "Renamed Since The Backup"
-            s.add(u)
-            await s.commit()
-
-        await backup_state.restore_state(tmp_path / "bk")
-
-        async with fresh_db() as s:
-            assert (await s.get(User, ids["users"][0])).full_name == "Renamed Since The Backup"
+def rewrite_manifest(archive, mutate):
+    path = archive / backup_state.MANIFEST_NAME
+    manifest = json.loads(path.read_text())
+    mutate(manifest)
+    path.write_text(json.dumps(manifest))
 
 
-class TestSchemaGuard:
-    """A restore into a differently-migrated schema is how backups corrupt data."""
+def replace_rows(archive, table_name, rows):
+    path = archive / f"{table_name}.jsonl"
+    path.write_text("".join(json.dumps(row) + "\n" for row in rows))
 
-    @staticmethod
-    async def _set_revision(revision: str) -> None:
-        from app.database import engine
+    def update(manifest):
+        entry = manifest["tables"][table_name]
+        entry["sha256"] = hashlib.sha256(path.read_bytes()).hexdigest()
+        entry["rows"] = len(rows)
+        manifest["row_counts"][table_name] = len(rows)
 
-        async with engine.begin() as conn:
-            await conn.execute(
-                sa.text("CREATE TABLE IF NOT EXISTS alembic_version (version_num VARCHAR(32))")
-            )
-            await conn.execute(sa.text("DELETE FROM alembic_version"))
-            await conn.execute(
-                sa.text("INSERT INTO alembic_version (version_num) VALUES (:v)"), {"v": revision}
-            )
+    rewrite_manifest(archive, update)
 
-    async def test_revision_is_recorded_in_the_manifest(self, fresh_db, tmp_path):
-        await self._set_revision("abc123")
-        await _seed(fresh_db)
-        manifest = await backup_state.export_state(tmp_path / "bk")
-        assert manifest["alembic_revision"] == "abc123"
 
-    async def test_mismatched_revision_refuses_to_restore(self, fresh_db, tmp_path):
-        await self._set_revision("abc123")
-        await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk")
+async def test_default_export_contains_complete_state(backup_engine, tmp_path):
+    await seed_rows(backup_engine)
+    archive = tmp_path / "archive"
+    manifest = await backup_state.export_state(archive, db_engine=backup_engine)
+    assert manifest["format_version"] == 2
+    assert manifest["includes_complaints"] is True
+    assert manifest["row_counts"]["complaints"] == 2
+    assert set(manifest["tables"]) == set(SQLModel.metadata.tables)
+    assert manifest["alembic_revision"] == "test-schema-v1"
+    assert archive.stat().st_mode & 0o777 == 0o700
+    for entry in manifest["tables"].values():
+        path = archive / entry["file"]
+        assert hashlib.sha256(path.read_bytes()).hexdigest() == entry["sha256"]
+        assert path.stat().st_mode & 0o777 == 0o600
 
-        await self._set_revision("def456")
-        with pytest.raises(RuntimeError, match="schema mismatch"):
-            await backup_state.restore_state(tmp_path / "bk")
 
-    async def test_force_overrides_the_guard(self, fresh_db, tmp_path):
-        await self._set_revision("abc123")
-        await _seed(fresh_db)
-        await backup_state.export_state(tmp_path / "bk")
-        await self._set_revision("def456")
+async def test_default_roundtrip_preserves_exact_ids_text_and_relationships(
+    backup_engine, tmp_path
+):
+    await seed_rows(backup_engine)
+    expected = await dump_rows(backup_engine)
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    await empty_rows(backup_engine)
+    inserted = await backup_state.restore_state(archive, db_engine=backup_engine, batch_size=1)
+    assert inserted == {name: len(rows) for name, rows in expected.items()}
+    assert await dump_rows(backup_engine) == expected
 
-        await backup_state.restore_state(tmp_path / "bk", force=True)  # does not raise
 
-    async def test_missing_manifest_is_rejected(self, fresh_db, tmp_path):
-        (tmp_path / "empty").mkdir()
-        with pytest.raises(FileNotFoundError, match="not a backup directory"):
-            await backup_state.restore_state(tmp_path / "empty")
+async def test_nonempty_target_refused_without_overwriting(backup_engine, tmp_path):
+    await seed_rows(backup_engine)
+    before = await dump_rows(backup_engine)
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    with pytest.raises(backup_state.BackupError, match="requires empty"):
+        await backup_state.restore_state(archive, db_engine=backup_engine)
+    assert await dump_rows(backup_engine) == before
+
+
+@pytest.mark.parametrize("damage", ["missing", "checksum", "legacy", "schema", "revision"])
+async def test_preflight_rejects_damage_before_insert(backup_engine, tmp_path, damage):
+    await seed_rows(backup_engine)
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    await empty_rows(backup_engine)
+    if damage == "missing":
+        (archive / "complaints.jsonl").unlink()
+    elif damage == "checksum":
+        with (archive / "complaints.jsonl").open("ab") as stream:
+            stream.write(b"\n")
+    elif damage == "legacy":
+        rewrite_manifest(archive, lambda m: m.update(format_version=1))
+    elif damage == "revision":
+        rewrite_manifest(archive, lambda m: m.update(alembic_revision="different"))
+    else:
+        rewrite_manifest(
+            archive, lambda m: m["tables"]["users"]["schema"]["columns"][0].update(type="BLOB")
+        )
+    with pytest.raises(backup_state.BackupError):
+        await backup_state.restore_state(archive, db_engine=backup_engine)
+    assert all(not rows for rows in (await dump_rows(backup_engine)).values())
+
+
+@pytest.mark.parametrize("conflict", ["duplicate", "foreign_key"])
+async def test_constraint_failure_rolls_back_entire_restore(backup_engine, tmp_path, conflict):
+    await seed_rows(backup_engine)
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    await empty_rows(backup_engine)
+    rows = [json.loads(line) for line in (archive / "resolutions.jsonl").read_text().splitlines()]
+    if conflict == "duplicate":
+        rows.append(rows[0])
+    else:
+        rows[0]["complaint_id"] = str(uuid.uuid4())
+    replace_rows(archive, "resolutions", rows)
+    with pytest.raises(sa.exc.IntegrityError):
+        await backup_state.restore_state(archive, db_engine=backup_engine, batch_size=1)
+    assert all(not rows for rows in (await dump_rows(backup_engine)).values())
+
+
+async def test_failed_export_has_no_completion_marker(backup_engine, tmp_path, monkeypatch):
+    await seed_rows(backup_engine)
+    archive = tmp_path / "archive"
+
+    def interrupted(_):
+        raise RuntimeError("synthetic interrupted export")
+
+    monkeypatch.setattr(backup_state, "_to_json", interrupted)
+    with pytest.raises(RuntimeError, match="interrupted"):
+        await backup_state.export_state(archive, db_engine=backup_engine)
+    assert not (archive / backup_state.MANIFEST_NAME).exists()
+    with pytest.raises(backup_state.BackupError, match="no completed manifest"):
+        await backup_state.restore_state(archive, db_engine=backup_engine)
+
+
+async def test_existing_archive_never_overwritten(backup_engine, tmp_path):
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    before = (archive / backup_state.MANIFEST_NAME).read_bytes()
+    with pytest.raises(FileExistsError):
+        await backup_state.export_state(archive, db_engine=backup_engine)
+    assert (archive / backup_state.MANIFEST_NAME).read_bytes() == before
+
+
+async def test_unmapped_table_cannot_be_silently_omitted(backup_engine, tmp_path):
+    async with backup_engine.begin() as conn:
+        await conn.execute(sa.text("CREATE TABLE unexpected_state (id INTEGER)"))
+    with pytest.raises(backup_state.BackupError, match="inventory"):
+        await backup_state.export_state(tmp_path / "archive", db_engine=backup_engine)
+
+
+async def test_revision_required(backup_engine, tmp_path):
+    async with backup_engine.begin() as conn:
+        await conn.execute(sa.text("DROP TABLE alembic_version"))
+    with pytest.raises(backup_state.BackupError, match="no Alembic revision"):
+        await backup_state.export_state(tmp_path / "archive", db_engine=backup_engine)
+
+
+async def test_schema_guard_detects_missing_unique_index(backup_engine, tmp_path):
+    archive = tmp_path / "archive"
+    await backup_state.export_state(archive, db_engine=backup_engine)
+    async with backup_engine.begin() as conn:
+        await conn.execute(sa.text("DROP INDEX ix_users_email"))
+    with pytest.raises(backup_state.BackupError, match="schema mismatch for table users"):
+        await backup_state.restore_state(archive, db_engine=backup_engine)
+
+
+def test_unsafe_legacy_cli_flags_removed():
+    for flag in ["--force", "--include-complaints"]:
+        with pytest.raises(SystemExit):
+            backup_state._parse_args([flag])

@@ -25,7 +25,7 @@ from app.config import settings
 from app.models.audit_log import AuditLog
 from app.models.complaint import Complaint, ComplaintStatus
 from app.models.resolution import GuardrailStatus, Resolution
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 
 GENERATE_URL = "/api/v1/resolutions/{id}/generate"
 LATEST_URL = "/api/v1/resolutions/{id}"
@@ -45,7 +45,22 @@ async def factory():
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
         await conn.run_sync(SQLModel.metadata.create_all)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    # The auth override still represents persisted users: review events reference
+    # their IDs through a real foreign key.
+    async with sessions() as session:
+        for user in (_DUMMY_USER, _VIEWER_USER):
+            session.add(
+                User(
+                    id=user.id,
+                    email=user.email,
+                    full_name="Synthetic reviewer",
+                    hashed_password="unused",
+                    role=user.role,
+                )
+            )
+        await session.commit()
+    yield sessions
 
 
 @pytest.fixture()

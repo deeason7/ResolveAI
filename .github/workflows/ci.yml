@@ -1,6 +1,5 @@
-# Lint + tests on every push/PR. The suite runs on SQLite with injected
-# fakes for Redis/Qdrant/Neo4j/LLMs, so no service containers are needed —
-# which keeps the whole job under a couple of minutes.
+# Fast tests use SQLite and injected service fakes. A separate PostgreSQL job
+# verifies actual migrations, relational constraints, and concurrent sessions.
 name: ci
 
 on:
@@ -50,3 +49,40 @@ jobs:
         run: cp .env.example .env
       - name: Build images
         run: docker compose build api frontend
+
+  postgres-integration:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      contents: read
+    services:
+      postgres:
+        # Matches the currently supported Compose database image.
+        image: postgres:16.3-alpine
+        env:
+          POSTGRES_DB: resolveai_test_ci
+          POSTGRES_USER: resolveai_test
+          POSTGRES_PASSWORD: test-only-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U resolveai_test -d resolveai_test_ci"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v7
+      - uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+      - uses: astral-sh/setup-uv@v10.0.1
+      - name: Install backend with dev tools
+        working-directory: backend
+        run: uv sync --extra dev
+      - name: PostgreSQL migrations and integration tests
+        working-directory: backend
+        env:
+          PYTHONPATH: .
+          TEST_DATABASE_URL: postgresql+asyncpg://resolveai_test:test-only-password@127.0.0.1:5432/resolveai_test_ci
+          TEST_DATABASE_ALLOW_RESET: "yes"
+        run: uv run pytest tests/integration/ --run-postgres -m postgres -q

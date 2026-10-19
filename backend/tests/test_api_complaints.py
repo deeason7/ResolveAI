@@ -58,7 +58,7 @@ async def _register_and_token(client: AsyncClient, user: dict) -> str:
 
 
 async def _set_role(email: str, role: UserRole) -> None:
-    """Direct DB write to set a user's role — register only ever mints analysts."""
+    """Provision the explicit role needed by a test; registration creates viewers."""
     from app.database import engine
     from app.models.user import User
 
@@ -74,7 +74,9 @@ async def _set_role(email: str, role: UserRole) -> None:
 
 @pytest_asyncio.fixture()
 async def analyst_token(client: AsyncClient) -> str:
-    return await _register_and_token(client, VALID_USER)
+    token = await _register_and_token(client, VALID_USER)
+    await _set_role(VALID_USER["email"], UserRole.analyst)
+    return token
 
 
 @pytest_asyncio.fixture()
@@ -673,7 +675,7 @@ class TestWriterGate:
         assert r.status_code == 200
 
     async def test_analyst_can_submit(self, client: AsyncClient, analyst_token: str):
-        # the default writer role is unaffected — the gate is selective, not blanket
+        # Explicitly provisioned staff retain write access.
         r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(analyst_token))
         assert r.status_code == 201
 

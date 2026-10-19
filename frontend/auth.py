@@ -16,14 +16,13 @@ import api_client
 
 def render_login_page() -> None:
     st.title("ResolveAI")
-    st.caption("Intelligent complaint resolution — sign in to continue")
+    st.caption("Complaint triage and review — sign in to continue")
 
     with st.container(border=True):
         st.markdown("**👀 Just looking around?**")
         st.caption(
-            "Take a guided tour of the live system — 200,000 real CFPB complaints, "
-            "AI triage, precedent search, and agent-drafted resolutions. "
-            "No account needed; demo sessions are read-only."
+            "Explore public complaint examples, triage, and response drafts. "
+            "The shared demo has server-enforced viewer access."
         )
         if st.button("🚀 Launch the demo", type="primary", use_container_width=True):
             try:
@@ -33,7 +32,17 @@ def render_login_page() -> None:
             else:
                 st.rerun()
 
-    signin_tab, register_tab = st.tabs(["Sign in", "Create account"])
+    try:
+        registration_enabled = api_client.auth_capabilities()["public_registration_enabled"]
+    except api_client.ApiError:
+        registration_enabled = False
+        st.info("Access settings are unavailable. Sign in or contact an administrator.")
+
+    if registration_enabled:
+        signin_tab, register_tab = st.tabs(["Sign in", "Create viewer account"])
+    else:
+        signin_tab = st.container()
+        st.caption("Public registration is disabled. Contact an administrator for access.")
 
     with signin_tab, st.form("signin"):
         email = st.text_input("Email")
@@ -46,7 +55,11 @@ def render_login_page() -> None:
             else:
                 st.rerun()
 
+    if not registration_enabled:
+        return
+
     with register_tab, st.form("register"):
+        st.caption("Self-service accounts can view cases. Staff access is provisioned separately.")
         full_name = st.text_input("Full name")
         email = st.text_input("Email", key="reg_email")
         password = st.text_input("Password (min 8 chars)", type="password", key="reg_password")

@@ -1,13 +1,16 @@
-# Free-tier deployment ($0, no credit card)
+# Managed demonstration deployment
 
-This is the alternative to the single-VM runbook ([deployment.md](deployment.md)).
-Instead of renting one box to run the whole Compose stack, it **splits the stack
-across free, no-credit-card managed tiers** — so it costs nothing and stays up
-for a year or more, with no $200 credit burning down.
+This is the existing alternative to the single-VM runbook
+([deployment.md](deployment.md)). It splits the stack across managed services and
+uses a smaller corpus. Provider plans, card requirements, storage limits, idle
+policies and pricing have not been reverified; no zero-cost or availability
+promise is made. Confirm current account limits before deploying.
 
-Same code as `main`; the difference is config + a smaller corpus, carried on the
-**`deploy`** branch (the branch the hosting platforms track). Nothing here is a
-fork.
+The hosting configuration uses the `deploy` branch. Local changes do not update
+hosted behavior until a reviewed deployment completes. Use only public/synthetic
+data while the workflow and recovery limits in [architecture.md](architecture.md)
+remain unresolved. Production examples skip local inference and send model
+requests to the configured cloud provider.
 
 ## What runs where
 
@@ -23,7 +26,7 @@ fork.
                     ▼              ▼              ▼                ▼
                  Neon           Upstash       Qdrant Cloud      Neo4j Aura
                  (Postgres)     (Redis)       (vectors)         (graph)
-                                                   LLM ▶ Groq (free tier)
+                                                   LLM ▶ Groq (configured plan)
 ```
 
 The browser only ever talks to Streamlit; Streamlit calls the Space's API
@@ -32,17 +35,18 @@ empty is correct here too — there's no cross-origin browser call to permit.
 
 ## Prerequisites
 
-Six free accounts, **none requiring a card**:
+Accounts and credentials for these services are required. Choose current plans
+from the providers' published terms; the table describes component roles only.
 
-| Service | Free tier | Holds |
-|---------|-----------|-------|
-| [Neon](https://neon.tech) | ~0.5 GB | Postgres (system of record) |
-| [Upstash](https://upstash.com) | 500K commands/mo | Redis streams |
-| [Qdrant Cloud](https://cloud.qdrant.io) | 1 GB cluster | embeddings |
-| [Neo4j Aura](https://neo4j.com/cloud/aura-free/) | 1 instance | knowledge graph |
-| [Hugging Face](https://huggingface.co) | CPU Basic Space | API + both workers |
-| [Streamlit Community Cloud](https://streamlit.io/cloud) | 1 public app | dashboard |
-| [Groq](https://console.groq.com) | free tier | classification + drafting LLM |
+| Service | Holds |
+|---------|-------|
+| [Neon](https://neon.tech) | PostgreSQL business records |
+| [Upstash](https://upstash.com) | Redis streams and token revocation |
+| [Qdrant Cloud](https://cloud.qdrant.io) | Narrative embeddings |
+| [Neo4j Aura](https://neo4j.com/cloud/aura-free/) | Derived graph |
+| [Hugging Face](https://huggingface.co) | API and both workers |
+| [Streamlit Community Cloud](https://streamlit.io/cloud) | Dashboard |
+| [Groq](https://console.groq.com) | Cloud classification and drafting |
 
 ---
 
@@ -56,8 +60,8 @@ Create each service, then collect its connection details into a local
   `DB_REQUIRE_SSL=true` instead.
 - **Upstash** → copy the `rediss://` URL as-is. The `rediss` scheme turns on TLS
   automatically. The `.env.free` cadence knobs (`WORKER_BLOCK_MS=30000`,
-  `WORKER_RECLAIM_EVERY=4`) keep the two idle workers under the 500K/mo command
-  cap — leave them in.
+  `WORKER_RECLAIM_EVERY=4`) reduce idle polling. Measure actual commands and
+  compare them with your plan; this is not a quota guarantee.
 - **Qdrant Cloud** → copy the cluster URL into `QDRANT_URL` and the key into
   `QDRANT_API_KEY`.
 - **Neo4j Aura** → save the generated password at creation (shown once), then copy
@@ -70,10 +74,10 @@ Create each service, then collect its connection details into a local
 ## 2. Backend → Hugging Face Space
 
 The root `Dockerfile` builds one image that runs the API and both stream workers
-together under `supervisord` (a free Space is a single container; each program
+together under `supervisord` (this topology uses a single container; each program
 restarts independently). To deploy:
 
-1. **Create a Space** → SDK **Docker**, hardware **CPU basic** (free).
+1. **Create a Space** with the Docker SDK and hardware appropriate to the workload.
 2. **Give it the code.** Add the Space as a git remote and push the `deploy`
    branch to it (the Space builds from its own repo root, which is why the
    `Dockerfile` lives at the repo root):
@@ -102,8 +106,8 @@ restarts independently). To deploy:
    QDRANT_URL/QDRANT_API_KEY, NEO4J_URI/USER/PASSWORD, GROQ_API_KEY, the JWT
    secrets, ENVIRONMENT=production, and the two WORKER_* knobs).
 
-> A free Space **pauses after ~48 h idle** and wakes on the next visit. While
-> paused it runs nothing — which also means it spends zero Upstash commands.
+> Confirm the current hosting plan's idle/pause behavior. Paused workers do not
+> process queued complaints; a successful frontend load does not prove worker progress.
 
 ---
 
@@ -125,7 +129,7 @@ export PYTHONPATH=.
 # 1. schema on Neon (DB_REQUIRE_SSL=true applies TLS)
 .venv/bin/alembic upgrade head
 
-# 2. download a ~30K sample (fits Neon 0.5 GB / Qdrant 1 GB)
+# 2. example sample size; verify database/index capacity for your selected plans
 .venv/bin/python ../scripts/download_cfpb_data.py \
   --output /tmp/cfpb_30k.csv --limit 30000 --workdir /tmp/cfpb_wd
 
@@ -136,15 +140,16 @@ from app.services.data_ingestion import ingest_cfpb_csv
 print(asyncio.run(ingest_cfpb_csv("/tmp/cfpb_30k.csv")))
 PY
 
-# 4. embed into Qdrant Cloud (~15 min for 30K on a laptop CPU)
+# 4. embed into Qdrant Cloud; measure runtime and completion on your hardware
 .venv/bin/python ../scripts/populate_vector_db.py
 
 # 5. seed the Aura graph (top 500 companies)
 .venv/bin/python ../graph_seed/seed_graph.py --limit 500
 ```
 
-Every step is idempotent, so a run interrupted halfway just resumes on the next
-invocation.
+Inspect stage output and persisted state before retrying. The download/extraction
+and import paths have known interruption and batch-size limits; do not infer a
+complete import from the existence of a nonempty output file.
 
 ---
 
@@ -165,7 +170,9 @@ invocation.
 
 ## 5. Verify end to end
 
-Open the Streamlit URL and **Try the demo** (or register). Then:
+Open the Streamlit URL with an explicitly provisioned viewer account for browsing
+and a staff account for the synthetic write checks. Registration does not grant
+staff access. Then:
 
 - The **Board** / **Triage** pages load complaints → Neon is connected.
 - **Workspace → enqueue a small classification batch** → Upstash + the Space's
@@ -187,89 +194,64 @@ git checkout main && git merge --no-ff develop
 git tag -a v1.4.0 -m "..." && git push origin main --tags
 ```
 
-The workflow re-runs lint, tests and the image build, refuses to ship a tag that
+The workflow re-runs lint, tests and Compose image builds, refuses to ship a tag that
 isn't on `main`, merges the tagged commit into `deploy`, and force-pushes
 `deploy` to the Space's `main` to trigger a rebuild. Merging to `main` on its own
-deploys nothing; the tag is the commitment.
+deploys nothing; the tag triggers remote publication. The gate does not currently
+build/test the root hosting Dockerfile or verify post-deploy readiness; do not
+equate a successful Git push with a healthy deployed workflow.
 
 It needs one secret, `HF_TOKEN` — a Hugging Face token with **write** access to
 the Space, under *Settings → Secrets and variables → Actions*. Without it the
-job fails at the last step rather than half-deploying.
+job fails at the publication step. Inspect remote branch and hosting state
+before retrying a failed release.
 
-A merge conflict fails the run loudly instead of guessing; it will be
-`README.md`, where the front-matter lives. Fix it locally, push `deploy`, and
+A merge conflict fails the run; inspect the actual conflicting paths, which may
+include `README.md` where the front-matter lives. Fix it locally, push `deploy`, and
 re-run the workflow from the Actions tab.
 
 ## Backups
 
-Free tiers can be reclaimed, so the question is what's actually irreplaceable. Most of the
-database isn't: complaints come from the CFPB's public bulk download, and both the vector store
-and the graph are *derived* from that table — `populate_vector_db.py` and `seed_graph.py` rebuild
-them from scratch. What can't be regenerated is the state the app produced: accounts, the drafts
-the agent wrote, the LLM call log behind the observability dashboard, and the audit trail.
+PostgreSQL contains irreplaceable business identities and relationships, including
+complaint UUIDs, users, labels, drafts, telemetry and review records. Downloading the
+same public corpus again does not recover those UUIDs or reconnect child records.
+Vector and graph stores are derived; rebuild them only after restoring the database.
 
-On this deployment that's a few hundred rows against 30K complaints, so the backup is small:
+Use a full logical PostgreSQL backup with a compatible `pg_dump` client, secure
+credentials, a manifest/checksum and a restore drill into an isolated empty target.
+See [the operational backup direction](deployment.md#operations). Use a client
+matching the server major version; client setup effort is not a reason to omit
+authoritative complaint rows. Never tar a running PostgreSQL data directory.
 
-```bash
-python scripts/backup_state.py                      # -> backups/<utc stamp>/, one JSONL per table
-python scripts/backup_state.py --include-complaints # + the corpus, if you'd rather not re-ingest
-```
+Legacy `backup_state.py` exports defaulted to omitting complaints. Treat those
+archives as partial; re-ingesting the corpus and skipping conflicting IDs is not
+a verified recovery procedure. Do not override schema checks or merge into a
+nonempty target to make a restore appear successful. Use the verified version 2
+[archive procedure](backup_recovery.md) for new backups; this does not repair old archives.
 
-`backups/` is gitignored — an export contains real email addresses and password hashes, so treat
-it like the `.env` files.
+Backup files contain sensitive account and complaint data. Keep them outside Git,
+restrict access, and prove that representative identities, relationships and draft
+history survive restoration before relying on an archive.
 
-Restoring is idempotent; rows whose primary key already exists are skipped, so it never
-duplicates and never clobbers something newer:
+## Capacity and inactivity
 
-```bash
-python scripts/backup_state.py --restore backups/20260820T142647-0500
-```
+Measure storage, Redis command usage and inference tokens against the selected
+plans. Polling settings reduce idle traffic but do not eliminate backlog growth or
+provider limits. Define an observable failure path for suspended services; a page
+load or `GET /health` only proves the process answered, not that datastores and
+workers are functioning.
 
-The manifest records the alembic revision the rows were written against, and a restore into a
-database on a different revision refuses rather than proceeding — that mismatch is the usual way
-a backup turns into a corruption. `--force` overrides it once you've checked the schemas agree.
+Check each provider's current pause, archival and deletion terms. Keep backups
+outside the provider and record recovery steps. Do not rely on scheduled keepalive
+requests as a guarantee against deletion or a substitute for a verified restore.
 
-Full recovery order after losing an instance: `alembic upgrade head` → re-ingest the corpus
-(section 3) → `--restore` the app state → rebuild Qdrant and the graph.
+## Revised account and archive procedures
 
-Deliberately not `pg_dump`: the managed Postgres is v18, which would pin every machine that ever
-takes a backup to a v18 client. This goes through the same engine the app already uses.
+Before enabling a public deployment, follow [account provisioning](access.md)
+for the viewer demo and explicitly selected staff users. Existing roles are not
+automatically remediated by changing the default registration role.
 
-## Limits to know
-
-- **Neon 0.5 GB** caps the corpus at ~30K rows — that's the `SEED_ROWS` default
-  used above.
-- **Groq free tier** meters tokens/minute, so a large enqueue paces itself
-  through the worker's rate-limit backoff rather than failing.
-- **Upstash 500K/mo** is the reason for the widened worker poll cadence; don't
-  drop `WORKER_BLOCK_MS` back to the dev default on this deployment.
-- **HF idle pause** means the first visit after a quiet spell is slow while the
-  Space wakes.
-
-### Inactivity clocks — the ones that delete things
-
-Idle pauses are recoverable. Two of these tiers eventually delete instead, so a
-deployment you stop visiting does not just go to sleep:
-
-| service | idle behaviour | point of no return |
-|---|---|---|
-| Hugging Face Space | sleeps after ~48 h | — wakes on visit |
-| Neon | compute suspends after 5 min | — auto-resumes on connect |
-| Upstash Redis | — | **archived after 30 d idle** (data backed up first) |
-| Neo4j Aura Free | pauses after ~3 d | **deleted 30 d after pausing** |
-| Qdrant Cloud Free | suspended after 7 d | **deleted after 28 d** |
-
-**Qdrant is the one to plan for.** Losing it costs every embedding and breaks
-both similar-complaint lookup and the agent's precedent search. It is derived
-state, so recovery is a rebuild rather than a restore:
-
-```bash
-python scripts/populate_vector_db.py    # re-embeds from Postgres
-```
-
-A scheduled job that touches each backend daily keeps all of these clocks reset.
-Reaching Postgres and Neo4j takes an authenticated request; reaching the vector
-store takes one that runs a search — `GET /complaints/{id}/similar` returns 503
-when the vector store is unreachable, which makes it usable as an assertion
-rather than a liveness echo. `GET /health` deliberately touches no datastore, so
-it cannot stand in for any of them.
+Use the [version 2 backup/restore procedure](backup_recovery.md) for complete
+application archives. It includes complaints by default, requires a matching
+empty restore target, and removes the legacy --force/partial-restore behavior.
+Hosted access, backup scheduling and production recovery still need verification.

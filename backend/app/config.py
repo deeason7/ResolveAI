@@ -122,6 +122,16 @@ class Settings(BaseSettings):
     jwt_algorithm: str = "HS256"
     access_token_expire_minutes: int = 30
     refresh_token_expire_days: int = 7
+    # Unset keeps local/test setup usable; every other environment fails closed.
+    # Explicitly enabled registration still grants viewer access only.
+    public_registration_enabled: bool | None = None
+    demo_email: str = "demo@resolveai-demo.com"
+
+    @property
+    def registration_enabled(self) -> bool:
+        if self.public_registration_enabled is not None:
+            return self.public_registration_enabled
+        return self.environment in {"development", "test"}
 
 
 settings = Settings()

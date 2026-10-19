@@ -115,3 +115,6 @@ quote-style = "double"
 asyncio_mode = "auto"
 asyncio_default_fixture_loop_scope = "function"
 testpaths = ["tests"]
+markers = [
+    "postgres: destructive integration tests requiring --run-postgres and a dedicated PostgreSQL URL",
+]

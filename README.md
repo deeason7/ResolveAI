@@ -1,240 +1,178 @@
-# ResolveAI — Intelligent Complaint Resolution Engine
+# ResolveAI — Complaint Triage and Review
 
-> 🔗 **Live demo → https://resolveaideeason.streamlit.app/** — the full pipeline running on free, no-credit-card infrastructure ($0/mo), over a 30K slice of the corpus that fits the free storage tiers. First load may take ~30–60s while the free Space wakes from idle.
+ResolveAI is a prototype for reviewing consumer financial complaints: prioritize a
+queue, inspect similar public cases, generate a draft and review it. It combines a
+FastAPI backend, PostgreSQL and a Streamlit interface with optional model inference.
 
-A full-stack system that triages real consumer financial complaints, drafts
-regulation-aware responses with an agent, validates every draft through a
-layered guardrail engine, and keeps a human reviewer in charge of the final
-word. Built over **200,000 real complaints** from the CFPB's public consumer
-complaint database.
+[Hosted demo](https://resolveaideeason.streamlit.app/) ·
+[Architecture](docs/architecture.md) · [Product scope](docs/product_scope.md) ·
+[Demo walkthrough](docs/demo_script.md)
 
-The short version: complaints come in → a **fine-tuned 3B model** classifies
-sentiment, intent and urgency → **vector search** finds precedent cases and a
-**knowledge graph** supplies the regulations in play → an **agent** drafts a
-response → **four guardrail layers** check structure, safety, regulatory
-grounding and tone → a reviewer approves or rejects with feedback that feeds
-regeneration. Every model call is metered into an LLMOps log you can browse
-in the dashboard.
+The demo is for public historical records and synthetic submissions. Hosting
+availability, loaded record counts and account roles must be verified against the
+deployed revision. A public complaint is an allegation; a company response label
+is not proof that the customer's problem was resolved.
 
-> **Just want to look around?** Open the [live demo](https://resolveaideeason.streamlit.app/) — or run the stack locally — and hit **Launch the demo** on
-> the login screen — a read-only guided tour that walks every page and
-> explains both the product and the architecture as you go (each page carries
-> an "Under the hood" panel with the engineering decisions behind it).
+## What works, and what the prototype does not prove
 
----
+The API supports complaint intake, classification, similarity lookup, draft
+generation and reviewer approval/rejection. Rejection feedback feeds regeneration.
+The dashboard includes triage, case details, aggregates, a graph explorer, logged
+model usage and a workspace for staff-triggered batches.
 
-## The pipeline
+Approval currently sets a case to `resolved`; this records an application decision,
+not delivery, remediation or customer satisfaction. Editing the visible draft does
+not save a new revision, and approval is not yet bound to the exact visible draft
+version. Real customer use requires those review-integrity fixes and verified
+recovery. No reviewer-time savings, resolution-rate improvement, production
+reliability or legal-correctness result has been established.
+
+## Current pipeline
 
 ```mermaid
 flowchart LR
-    A[Complaint intake] --> Q[Redis Stream]
+    A[Complaint API] --> PG[(PostgreSQL)]
+    A --> Q[Redis Stream]
     Q --> W[Classification worker]
-    W -->|local first| SLM[Fine-tuned SLM via Ollama]
-    W -->|cloud fallback| GROQ[Groq gpt-oss-120b]
-    W -->|nothing answers| FC[Fail closed: max severity, escalate to human]
-    W --> PG[(PostgreSQL)]
-    W --> VDB[(Qdrant embeddings)]
-    W --> KG[(Neo4j knowledge graph)]
-    AG[Resolution agent] --> VDB
-    AG --> KG
-    AG --> GR[Guardrail engine: 4 layers]
-    GR -->|pass| HR[Draft ready for human review]
-    GR -->|fail, with feedback| AG
-    HR --> UI[Streamlit dashboard]
+    W --> L[Configured local or cloud model]
+    W --> PG
+    W --> V[(Qdrant)]
+    W --> G[(Neo4j)]
+    R[Drafting worker] --> V
+    R --> G
+    R --> L
+    R --> C[Pattern checks and tone judge]
+    C --> UI[Human review]
+    UI --> PG
 ```
 
-Design rules that hold everywhere:
+PostgreSQL stores business records. Qdrant and Neo4j contain derived search/context
+information. Redis publication and database commits are currently separate, so
+this diagram is not a guarantee of atomic enqueueing or lossless processing.
+Worker replay and stale-result handling need further protection.
 
-- **PostgreSQL is the source of truth.** Qdrant and Neo4j are derived,
-  best-effort side-channels; a Redis hiccup never loses a complaint because
-  durable status fields let a sweep re-enqueue.
-- **Fail closed, never silent.** If no model answers, complaints are flagged
-  maximum-severity for human attention instead of guessing — and the
-  deterministic-fallback path is visibly distinct from cloud-fallback in the
-  telemetry.
-- **The human owns the outcome.** Agents draft; reviewers approve. Rejection
-  feedback is injected into the regeneration prompt.
+Local inference requires an installed compatible model. Both production environment
+examples set `LLM_SKIP_LOCAL=true`, using cloud inference by default. At the
+2026-10-17 reviewed baseline, total provider failure produces a deterministic
+urgency-3 fallback which can be stored as classified; it is not an escalated
+prediction. [Architecture and limits](docs/architecture.md) explain these boundaries.
 
-## The dashboard
+## Dashboard
 
-Six pages behind JWT auth (short-lived access token + rotating httpOnly
-refresh cookie), plus a one-click read-only demo session for visitors:
-
-| Page | What it does |
+| Page | Current capability |
 |---|---|
-| **Dashboard** | Volume cards (anchored to the data's own clock, not wall-clock), sentiment donut with honest *unclassified* coverage, urgency × product heatmap, top companies |
-| **Triage Queue** | Priority-sorted worklist over the full corpus — ordering, filtering, pagination all server-side |
-| **Complaint Detail** | Narrative + classification, top-5 similar complaints via vector search (with how each was historically resolved), agent chain-of-thought, per-layer guardrail verdicts, approve / reject-with-feedback |
-| **Analytics** | Weekly sentiment trend, product treemap, urgency histogram, company scorecard joining Postgres aggregates with Neo4j risk scores |
-| **Graph Explorer** | Interactive vis.js canvas over the knowledge graph — search any company/product/issue/regulation, inspect nodes, re-center |
-| **LLMOps Observatory** | Spend with cumulative overlay, local/cloud/fail-closed routing, p50/p95 latency per operation, classifier drift, guardrail violation log |
+| Dashboard | Volume, date windows, classification coverage, product/company aggregates |
+| Triage Queue | Server-side filtering, ordering and pagination |
+| Complaint Detail | Narrative, classification, similar public cases, draft trace, checks and review controls |
+| Analytics | Trends and company aggregates with graph-derived scores |
+| Graph Explorer | Company/product/issue/reference relationships |
+| LLMOps Observatory | Logged usage, estimated cost, latency and violations; incomplete attempt coverage |
+| Workspace | Case-state counts and staff batch controls |
 
-## The model
+## Model experiment and checks
 
-The classifier is **Qwen2.5-3B-Instruct fine-tuned with QLoRA** (4-bit NF4,
-LoRA r=16 on all linear layers, class-weighted loss for the skewed label
-distribution) on ~10K teacher labels, then exported to **GGUF Q4_K_M
-(1.9 GB)** and served locally by Ollama — with Groq as the cloud fallback
-when local inference is unavailable.
+The repository includes QLoRA training, evaluation, GGUF export and Ollama serving
+scripts for Qwen2.5-3B-Instruct. The available evaluation splits overlap: 185 of
+995 test narratives also occur in training. The historical scores therefore do
+not establish generalization. The baseline prompt also omits the complete output
+contract, and labels are teacher-generated rather than independently established
+gold. [The fine-tuning guide](docs/fine_tuning_guide.md) preserves the historical
+numbers, explains the macro-F1 reporting difference, and defines a fair rerun.
 
-Held-out evaluation (995 examples):
-
-| Metric | Score |
-|---|---|
-| Sentiment accuracy / macro-F1 | **0.90 / 0.84** |
-| Intent accuracy / macro-F1 | **0.85 / 0.76** |
-| Urgency MAE / Spearman | **0.223 / 0.845** |
-| Valid structured JSON | **99.7%** |
-
-The quantized deployment was re-verified through the real Ollama API
-(100-sample check: 100% parseable, 89% sentiment accuracy, urgency MAE 0.25)
-— quantization held. The full pipeline lives in `fine_tuning/`:
-label engineering with a rubric-anchored teacher, audit tooling (length-leak
-and template-collapse checks), training config, batched evaluation harness,
-GGUF export, and an Ollama smoke test.
-
-## Guardrails
-
-Every draft passes four layers before a human ever sees it:
-
-1. **Structural** — length, acknowledgment, concrete next steps
-2. **Content safety** — forbidden promises/legal advice, PII auto-redaction
-3. **Regulatory accuracy** — citations must be grounded in the regulations
-   the graph actually returned (no invented statutes)
-4. **Tone** — LLM-as-judge scoring empathy/professionalism/actionability,
-   with deterministic thresholds and a fail-closed verdict if the judge is
-   unreachable
-
-Failures regenerate with the violations fed back as instructions, up to a
-retry cap; unresolved drafts escalate to humans. Violations are stored
-structured (layer, rule, message) and browsable in the Observatory.
+Draft checks cover structural keywords, selected prohibited phrases, numeric PII
+patterns, citation-title matches and model-scored tone. They do not verify law,
+factual support or complete PII removal. Raw narrative/context can reach a cloud
+provider before output redaction. Reviewers must inspect the original evidence;
+a green check is not a compliance certification.
 
 ## Stack
 
-| Service | Role | Host port |
+| Component | Role | Development host port |
 |---|---|---|
-| FastAPI (async) | REST API, JWT auth, rate limiting | 8010 |
-| PostgreSQL 16 | System of record | 5433 |
-| Redis 7 | Streams (work queues) + token blocklist | 6380 |
-| Qdrant | 200K × 384-dim narrative embeddings, cosine search | 6334 |
-| Neo4j 5 + APOC | Company / product / issue / regulation graph | 7475 / 7688 |
-| Ollama | Local inference for the fine-tuned GGUF | 11435 |
-| Streamlit | Dashboard frontend | 8511 |
+| FastAPI | API, authentication, authorization and rate limits | 8010 |
+| PostgreSQL 16 | Business records | 5433 |
+| Redis 7 | Streams and token revocation | 6380 |
+| Qdrant | 384-dimensional narrative similarity search | 6334 |
+| Neo4j 5 + APOC | Seeded relationship/reference graph | 7475 / 7688 |
+| Ollama | Optional local model serving | 11435 |
+| Streamlit | Reviewer interface | 8511 |
 
-Everything runs in Docker Compose with health checks, named volumes,
-non-root containers, and env-driven config (`.env`, never committed).
+## Local setup
 
-## Quick start
-
-Prereqs: Docker Desktop (or engine + compose v2), ~6 GB free RAM for the stack.
+Use Docker Engine/Desktop with Compose v2. Capacity depends on corpus size and
+whether local inference is enabled. Use synthetic data initially.
 
 ```bash
-git clone <repo-url> && cd Resolve_AI
-cp .env.example .env        # set real passwords + JWT secrets (any long strings)
-docker compose up -d        # 7 services; first build takes a few minutes
+git clone <repo-url>
+cd Resolve_AI
+cp .env.example .env
+# Set distinct random credentials and JWT secrets before starting.
+docker compose up -d
 ```
 
-- Dashboard: <http://localhost:8511> — register an account, or click
-  **Launch the demo**
-- API docs (OpenAPI): <http://localhost:8010/docs>
+The dashboard is at <http://localhost:8511> and API documentation at
+<http://localhost:8010/api/docs>. The stack starts empty. Staff and demo access require
+explicit account provisioning; public self-registration must not confer staff
+privileges. A viewer can inspect records but cannot submit, enqueue or approve. Follow
+[account provisioning](docs/access.md) to preview and create the intended staff
+and viewer accounts; production registration is disabled by default.
 
-The stack boots empty. To load the real corpus:
+The data scripts are `scripts/download_cfpb_data.py` (public corpus download),
+`scripts/populate_vector_db.py` (embeddings), and `graph_seed/seed_graph.py`
+(derived graph). Corpus import uses the admin-only bulk-import API. The downloader's
+sample limit is a configuration choice, not evidence that a deployment contains or
+has processed that many records. Confirm import/rebuild completion before retrying
+an interrupted run; the current ingestion path has known batch/restart limits.
 
-```bash
-# 1. Download + normalize CFPB complaints (~200K rows, reservoir-sampled)
-docker compose exec api python /scripts/download_cfpb_data.py \
-  --output /fine_tuning/data/raw/cfpb_200k.csv \
-  --workdir /fine_tuning/data/raw/_cfpb_workdir
-
-# 2. Promote your account to admin (bulk import is admin-gated)
-docker compose exec postgres psql -U resolveai -d resolveai_db \
-  -c "UPDATE users SET role='admin' WHERE email='you@example.com';"
-
-# 3. Bulk-import via the API (idempotent) — POST /api/v1/complaints/bulk-import
-#    with {"path": "/fine_tuning/data/raw/cfpb_200k.csv"} (try it from /docs),
-#    then embed the corpus into Qdrant:
-docker compose exec api python /scripts/populate_vector_db.py
-
-# 4. Seed the knowledge graph from the imported corpus
-docker compose exec api python /graph_seed/seed_graph.py
-```
-
-To classify complaints you'll want either the fine-tuned GGUF loaded into
-Ollama (see `fine_tuning/05_export_gguf.py` + `06_smoke_test.py`) or a
-`GROQ_API_KEY` in `.env`; the workers start on demand:
+Model work requires either a compatible Ollama model or a configured cloud key.
+Start the development workers when needed:
 
 ```bash
 docker compose exec -d api python -m app.workers.classification_worker
 docker compose exec -d api python -m app.workers.resolution_worker
 ```
 
-## Deploy
-
-Putting this on a server with a public URL is a separate, self-contained setup:
-a production Compose file that ships the built images, runs the stream workers
-as services, keeps every datastore on the internal network, and puts **Caddy**
-in front to terminate TLS with an auto-provisioned Let's Encrypt certificate —
-only ports 80/443 are exposed.
-
-```bash
-cp .env.production.example .env.production   # set a domain + real secrets
-docker compose -f docker-compose.prod.yml up -d --build
-./scripts/seed_all.sh                        # migrations + corpus + graph
-```
-
-The full runbook — a DigitalOcean walkthrough (any Ubuntu VM works),
-DNS/TLS, backups and troubleshooting — is in
-[`docs/deployment.md`](docs/deployment.md). To run it for **$0** on free
-managed tiers (Neon, Upstash, Qdrant Cloud, Aura, Hugging Face, Streamlit)
-instead of a VM, see [`docs/deployment-free.md`](docs/deployment-free.md).
-
-## Development
+## Development and deployment
 
 ```bash
 cd backend
-python -m pytest tests/ -v          # 543 tests, SQLite + fakes, no services needed
-python -m ruff check . ../frontend  # zero-warning policy, frontend included
-python -m ruff format --check . ../frontend
-pre-commit install                  # ruff + format on every commit
+python -m pytest tests/ -v
+python -m ruff check . ../frontend ../scripts
+python -m ruff format --check . ../frontend ../scripts
 ```
 
-Tests mock external services at injection seams (the vector store, graph
-store, LLM client and Redis are all constructor/dependency-injected), so the
-suite runs in ~25 seconds with no containers.
+The dated baseline at commit `0e75774` passed 543 backend tests with 11 warnings on
+2026-10-17, using SQLite and injected fakes. This does not establish PostgreSQL
+transaction behavior, browser coverage or production readiness. No frontend
+AppTest suite was present at that baseline. The current tree adds a separate
+PostgreSQL migration/recovery suite and focused frontend-client contract tests;
+these are not browser/AppTest coverage. See [testing](docs/testing.md) and
+[complete backup recovery](docs/backup_recovery.md) for reproducible commands.
 
-Release history is in [`CHANGELOG.md`](CHANGELOG.md). Releases are cut from
-`main`; a `v*` tag runs the full gate and ships to the hosted demo.
+[VM deployment](docs/deployment.md) and [managed deployment](docs/deployment-free.md)
+describe the existing configurations and recovery limits. Verify provider terms,
+quotas and costs before deploying; no zero-cost or uptime guarantee is made.
+The current `v*` tag workflow publishes to hosted infrastructure. Creating a release
+tag is a deployment operation, not simply documentation. See [CHANGELOG.md](CHANGELOG.md)
+for historical releases.
 
-## Project layout
+## Repository layout
 
-```
-backend/
-  app/
-    api/routes/      # auth, complaints, analytics, graph, resolutions, llmops
-    core/            # security, dependencies
-    models/          # SQLModel ORM (complaints, users, resolutions, llm_logs)
-    schemas/         # Pydantic wire contracts (never expose ORM rows)
-    services/        # classifier, embedder, vector/graph stores, guardrails,
-                     # llm client, agent/ (tools, prompts, orchestrator)
-    workers/         # Redis Streams consumers (classification, resolution)
-  alembic/           # migrations
-  tests/             # 30 test files
-frontend/            # Streamlit app: pages/, api_client, auth, tour,
-                     # engineering_notes, theme
-fine_tuning/         # label engineering → QLoRA training → eval → GGUF export
-graph_seed/          # curated regulations + patterns, Neo4j seeding
-scripts/             # CFPB download, embedding backfill
-```
+- `backend/app/`: API routes, schemas, models, services and stream workers.
+- `backend/alembic/`, `backend/tests/`: migrations and verification.
+- `frontend/`: Streamlit pages, API client, tour and explanatory notes.
+- `fine_tuning/`: labeling, training, evaluation and model export experiments.
+- `graph_seed/`: reference seeds and graph-building scripts.
+- `scripts/`: data loading, derived-index population and operational helpers.
 
-## Data
+## Data and next work
 
-Complaint data comes from the
-[CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/)
-— public, real, and messy in all the instructive ways. Names and account
-details in narratives arrive pre-redacted by the CFPB (`XXXX`); the guardrail
-engine adds its own PII redaction on the way out.
+Historical records come from the
+[CFPB Consumer Complaint Database](https://www.consumerfinance.gov/data-research/consumer-complaints/).
+Source redactions and output pattern matching do not guarantee the absence of
+personal information. Keep demonstrations limited to public/synthetic inputs.
 
-## Roadmap
-
-- Resolution-rate analytics, once enough reviewed resolutions accumulate to make
-  the number meaningful
+Priorities are access control, recoverable backups, explicit inference failures,
+exact draft review, durable work processing and manual completion. Validate the
+[proposed credit-reporting reviewer workflow](docs/product_scope.md) before adding
+more infrastructure or claiming business impact.

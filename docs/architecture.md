@@ -1,157 +1,135 @@
 # Architecture
 
-How ResolveAI is put together, and why it's put together that way. The
-README has the elevator version; this is the engineering version.
+This describes the implementation and its known limits. The initial review was
+2026-10-17; access control, PostgreSQL verification and backup handling were revised
+on 2026-10-18. Proposed queue/review changes are not existing guarantees.
 
-## System topology
+## Runtime topology
 
-Seven services under Docker Compose:
+| Component | Current role |
+|---|---|
+| FastAPI | API, authentication, validation and rate limits |
+| PostgreSQL | Complaints, users, draft resolutions, labels, telemetry and audit records |
+| Redis | Stream queues and refresh-token revocation |
+| Qdrant | 384-dimensional narrative embeddings for similarity search |
+| Neo4j with APOC | Company/product/issue relationships and seeded reference material |
+| Ollama | Optional local inference when a compatible model is installed |
+| Streamlit | Reviewer interface; Python makes API requests on the server |
 
-| Service | Role | Why it's here |
-|---|---|---|
-| `api` (FastAPI, async) | REST API, auth, validation, rate-limit middleware | Single entry point; also hosts the workers as on-demand processes |
-| `postgres` | System of record | Complaints, users, resolutions, labels, LLM telemetry |
-| `redis` | Streams (work queues) + refresh-token blocklist | At-least-once delivery with consumer groups; cheap revocation set |
-| `qdrant` | 200K × 384-dim narrative embeddings | Cosine similarity for precedent search |
-| `neo4j` (+APOC) | Company/product/issue/regulation graph | Relationship queries SQL is bad at: risk profiles, regulation lookup, bounded neighborhoods |
-| `ollama` | Local inference for the fine-tuned GGUF | Cost ≈ 0 classification when local hardware can carry it |
-| `frontend` (Streamlit) | Reviewer dashboard | Server-side Python renders everything; the browser never talks to the API directly |
+Development Compose includes these services. Production Compose starts the workers
+as services and makes Ollama opt-in. The managed hosting configuration runs the API
+and both workers in one container under supervisord, with external datastores.
+Both production environment examples set `LLM_SKIP_LOCAL=true`: their default
+classification path is cloud inference, not the fine-tuned local model.
 
-## The one rule that shapes everything: PostgreSQL is the truth
+## State and queue boundary
 
-Every other store is **derived and best-effort**:
-
-- Qdrant points and Neo4j nodes are written *after* the Postgres transaction
-  commits. If those writes fail, the complaint is still consistent — a
-  backfill can repair the side-channels from Postgres at any time.
-- Redis Stream messages are *signals*, not state. A complaint's durable
-  `status` field is what matters; if an enqueue is lost or a backlog is
-  deleted, a sweep can re-enqueue everything `pending`/`escalated` from
-  Postgres. Losing Redis loses no data, only promptness.
-
-This is why the submit endpoint commits first and enqueues
-best-effort-with-logging second, and why the workers treat "Qdrant down"
-as a warning, not a failure.
-
-## Async pipeline
+PostgreSQL is authoritative business storage. Qdrant and Neo4j are derived indexes;
+rebuild scripts exist, but rebuild completeness and duration need verification.
+Redis Streams use consumer groups and pending-message reclamation. These mechanisms
+allow redelivery; they do not make database updates and queue publication atomic.
 
 ```mermaid
 sequenceDiagram
     participant U as Client
     participant API as FastAPI
-    participant R as Redis Stream
-    participant CW as Classification worker
-    participant LLM as SLM / cloud LLM
     participant PG as PostgreSQL
-
-    U->>API: POST /complaints/
-    API->>PG: INSERT complaint (status=pending)
-    API->>R: XADD classification queue (best-effort)
-    API-->>U: 201 + complaint id
-    R->>CW: XREADGROUP (consumer group, PEL)
-    CW->>LLM: classify (local first, cloud fallback)
-    CW->>PG: classification + status + LLMLog (one txn)
-    CW->>R: XACK
+    participant R as Redis
+    participant W as Classification worker
+    participant L as Configured model provider
+    U->>API: Submit complaint
+    API->>PG: Insert and flush pending complaint
+    API->>R: Publish classification message
+    API->>PG: Dependency commits transaction
+    API-->>U: Complaint ID
+    R->>W: Read or reclaim message
+    W->>L: Classify outside database transaction
+    W->>PG: Persist classification and telemetry
+    W->>R: Acknowledge message
 ```
 
-- **Consumer groups** give at-least-once delivery: a crashed worker leaves
-  its message in the pending-entries list for redelivery.
-- **The classify call runs in a thread** (`asyncio.to_thread`) — the model
-  client is synchronous, and blocking the event loop would stall every
-  concurrent request in that process.
-- **SIGTERM drains gracefully**: the worker finishes the in-flight message,
-  ACKs, and exits.
+At the reviewed baseline, publishing precedes the request transaction's commit.
+A worker may race the insert, and a database rollback can leave a queued message.
+A lost enqueue can leave pending work without a durable job record. Replaying a
+message can also overwrite later case state. There is no verified automatic
+reconciliation guarantee. Transactional job persistence and stale-result fencing
+are required improvements, not properties of the current stream implementation.
 
-The resolution worker follows the same shape with one extra subtlety: a
-two-transaction choreography. It first flips the complaint to
-`agent_triggered` in its own transaction (so the UI can show progress), then
-writes the resolution + final status + N LLM log rows atomically.
+Synchronous model calls are offloaded with `asyncio.to_thread`. The resolution
+worker records `agent_triggered` in an initial transaction, then persists the
+result and logs in another. The database lock does not span model inference.
 
-## Classification routing and failure policy
+## Classification and drafting
 
-1. **Local first** — the fine-tuned Qwen2.5-3B via Ollama (free, private).
-2. **Cloud fallback** — Groq `openai/gpt-oss-120b` when local is unavailable
-   or skipped (`LLM_SKIP_LOCAL`). The model is a config default, so a
-   redeploy is how it moves when Groq retires one.
-3. **Fail closed** — if nothing answers, a deterministic fallback labels the
-   complaint `extreme_negative` / urgency 5 / `escalated`. When the system
-   is blind it demands human eyes; it never guesses politely.
+The classifier uses an installed local model unless local inference is skipped;
+otherwise the configured cloud provider is used. On provider failure, the reviewed
+classifier returns a deterministic negative/dispute-resolution/urgency-3 result
+with `provider="none"` and `succeeded=false`. The worker can store it as a normal
+classification. This is not a maximum-severity escalation or reliable manual-review
+state. Treat that row as unavailable model output, not a prediction.
 
-The telemetry keeps these stories distinct: fail-closed rows log as
-`provider="none"`, while `was_fallback=true` marks cloud-covering-for-local.
+The resolution agent uses a bounded flow: gather context, draft, validate,
+regenerate with feedback, then return a draft or escalate after the retry limit.
+Context gathering tolerates tool errors, so a completed draft can lack a source.
+Rejection feedback enters the regeneration prompt. The stored trace describes
+tool calls and workflow steps; it is not access to a model's private reasoning.
 
-## The resolution agent
+## Checks and human review
 
-A fixed pipeline, not a free-form loop — auditable and testable:
-
-1. Gather context concurrently (`asyncio.gather` with
-   `return_exceptions=True` — a dead tool degrades the draft, never kills
-   the run): precedents from Qdrant, regulations and company history from
-   Neo4j.
-2. Draft with the LLM, citing what the tools actually returned.
-3. Validate through the guardrail engine.
-4. On failure, regenerate with the violations injected as instructions
-   (bounded retries), then escalate to a human if still failing.
-
-Human rejection re-enters the same loop: reviewer feedback is injected
-exactly the way guardrail feedback is.
-
-## Guardrails: four layers, fail closed
-
-| Layer | Type | Checks |
+| Check | What it checks | What it does not establish |
 |---|---|---|
-| Structural | Pure function | Length bounds, acknowledgment present, concrete next steps |
-| Content safety | Pure function | Forbidden promises/legal advice patterns; PII auto-redaction |
-| Regulatory accuracy | Pure function | Every cited regulation must be grounded in what the graph returned — invented statutes are violations |
-| Tone | LLM-as-judge | Empathy / professionalism / actionability scores with deterministic thresholds (every score ≥ 6) |
+| Structure | Length and acknowledgment/next-step keywords | A correct or useful response |
+| Content patterns | Selected prohibited wording and numeric PII patterns in output | Complete PII removal or protection of cloud-bound inputs |
+| Citation matching | Title substrings in a separate citation list against retrieved titles | Correct law, supported prose, jurisdiction or applicability |
+| Tone judge | Model scores for empathy, professionalism and actionability | Factual or legal accuracy |
 
-The judge is *gated behind* clean deterministic layers (no point scoring a
-draft that's structurally broken) and is itself fail-closed: judge
-unreachable → no verdict → escalate, because "couldn't check" must never
-read as "passed". Violations persist as structured rows (layer, code,
-message) — filterable in the dashboard, usable as regeneration feedback.
+The tone judge runs only after deterministic checks pass. Unreachable judging
+produces a violation, but the current UI can show an unrun layer as passed.
+The agent constructor has a pass-through validator default; production workers
+explicitly inject the real engine. A completed check is a limited signal for
+human review, not a compliance certification.
 
-## Auth
+Approval currently chooses a draft by complaint rather than requiring the exact
+visible draft ID and version. Editing the displayed text does not save a revision.
+The resulting `resolved` status means approval, not delivery or a verified customer
+outcome. See [product scope](product_scope.md) for the intended outcome boundary.
 
-- Short-lived **JWT access token** (HS256) in the `Authorization` header.
-- **Rotating refresh token in an httpOnly cookie** — the frontend never
-  reads it; the browser (or the dashboard's per-session HTTP client cookie
-  jar) carries it. Logout adds the refresh token to a Redis blocklist.
-- The Streamlit dashboard holds the access token in session state and
-  silently refresh-retries on 401.
+## Authentication and API conventions
 
-## API conventions
+JWT access tokens travel in the Authorization header. Refresh tokens use an
+httpOnly cookie in Streamlit's per-session HTTP client; the browser does not call
+the API directly. Database role checks, not hidden controls, must authorize writes.
+Public registration is disabled by default outside development/test; when enabled
+it creates viewers. The configured demo identity is rejected if it is privileged.
+Staff provisioning is an explicit administrative operation; see [access](access.md).
+Token rotation and transport findings remain separate from role enforcement.
 
-- **Schemas ≠ models**: Pydantic wire contracts in `schemas/`, SQLModel ORM
-  rows in `models/`; ORM objects never serialize to the wire.
-- **Lean row shapes per view**: the triage queue ships 200-char previews,
-  not 20K-char narratives; the detail view fetches the full row by id.
-- **Aggregate in the database**: analytics endpoints return `GROUP BY`
-  results (O(groups)), never pages of raw rows to count client-side.
-- **Dialect seams made explicit**: tests run SQLite, production runs
-  Postgres. The two disagreements that can't be papered over — NULL
-  placement under `DESC` ordering and day-truncation SQL — are handled
-  explicitly (`NULLS LAST`, a per-dialect day-bucket helper).
-- **Declaration order matters**: static routes (`/queue`) are declared
-  before path-param routes (`/{id}`).
+Wire contracts use Pydantic schemas separately from SQLModel rows. Queue endpoints
+filter/order/page in SQL and send narrative previews; detail endpoints load the
+full case. Several charts use database aggregates. Other observability endpoints
+load unbounded rows into Python, and the analytics page makes serial graph calls;
+these need workload measurements and query limits before scale claims.
 
-## Observability
+## Telemetry and verification
 
-Every model call writes one `llm_logs` row — operation, provider, model,
-tokens, latency, cost, fallback flag — in the same transaction as the work
-it measures. The LLMOps endpoints (`/llmops/*`) are SELECTs over that table;
-the Observatory page renders them. Telemetry that's written with the work
-can't drift from it.
+Workers persist model/provider/token/latency/cost fields with some business writes.
+This is not a complete provider-call ledger: failed attempts, historical labels,
+unknown pricing and zero-duration fallback records limit interpretation. Recorded
+cost is an estimate for logged calls, not the cost of the corpus or total operation.
 
-## Testing strategy
+The 2026-10-17 baseline verification at commit `0e75774` passed 543 backend tests
+with 11 warnings. These use SQLite and injected provider/store/Redis fakes. They do
+not prove PostgreSQL migrations, transaction races, deployment readiness or browser
+behavior. No Streamlit AppTest suite was present at that baseline. Use the current
+test output for later revisions rather than treating this dated count as a gate.
 
-543 tests across 30 files, running in ~25s with **no services**: SQLite
-(via `aiosqlite`) plus injected fakes at the same seams production uses —
-the vector store, graph store, LLM client and Redis are all
-constructor/dependency-injected. External providers are never called in
-tests. The frontend shell is validated with Streamlit's `AppTest` harness
-(real script-run context, pre-seeded session state).
+## Recovery and database checks
 
-What SQLite can't catch (native-enum casts, NULL ordering) is exactly what
-the explicit dialect seams above exist for — found live, pinned in code,
-documented here so it stays found.
+Complete version 2 exports include all application tables in one PostgreSQL
+read-only snapshot. Restore requires a matching migrated schema and empty target,
+verifies files and relationships, and commits all rows together. See
+[backup recovery](backup_recovery.md). Legacy partial exports remain incomplete.
+
+The current [test foundation](testing.md) adds PostgreSQL migration, constraint,
+transaction-visibility, concurrency and default-restore checks. Client contract
+tests cover demo access behavior; there is still no browser/AppTest coverage.

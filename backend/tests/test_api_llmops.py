@@ -53,9 +53,15 @@ def _log(**overrides):
 
 async def _seed(*rows) -> None:
     from app.database import engine
+    from app.models.complaint import Complaint
+    from app.models.resolution import Resolution
 
     factory = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
     async with factory() as s:
+        # Guardrail-log fixtures need the complaint rows their drafts reference.
+        for complaint_id in {r.complaint_id for r in rows if isinstance(r, Resolution)}:
+            s.add(Complaint(id=complaint_id, narrative="Synthetic guardrail-log case"))
+        await s.flush()
         for r in rows:
             s.add(r)
         await s.commit()
