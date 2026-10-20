@@ -114,7 +114,13 @@ class TestStreamRetention:
 
         monkeypatch.setattr(settings, "stream_maxlen", 5)
         for i in range(40):
-            await enqueue_complaint(redis_client, f"00000000-0000-0000-0000-{i:012d}", stream="s")
+            await enqueue_complaint(
+                redis_client,
+                f"00000000-0000-0000-0000-{i:012d}",
+                expected_case_version=1,
+                input_revision=1,
+                stream="s",
+            )
 
         length = await redis_client.xlen("s")
         assert length <= 40, "trimming should not grow the stream"
@@ -126,7 +132,13 @@ class TestStreamRetention:
         from app.workers.classification_worker import enqueue_complaint
 
         for i in range(3):
-            await enqueue_complaint(redis_client, f"00000000-0000-0000-0000-{i:012d}", stream="s")
+            await enqueue_complaint(
+                redis_client,
+                f"00000000-0000-0000-0000-{i:012d}",
+                expected_case_version=1,
+                input_revision=1,
+                stream="s",
+            )
         await redis_client.xgroup_create("s", "g", id="0")
         msgs = await redis_client.xreadgroup("g", "c", {"s": ">"}, count=10)
         for _stream, entries in msgs:
@@ -142,6 +154,12 @@ class TestStreamRetention:
 
         monkeypatch.setattr(settings, "stream_maxlen", 5)
         for i in range(40):
-            await enqueue_resolution(redis_client, f"00000000-0000-0000-0000-{i:012d}", stream="r")
+            await enqueue_resolution(
+                redis_client,
+                f"00000000-0000-0000-0000-{i:012d}",
+                expected_case_version=1,
+                input_revision=1,
+                stream="r",
+            )
 
         assert await redis_client.xlen("r") < 40

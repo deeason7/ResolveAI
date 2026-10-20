@@ -2,7 +2,7 @@
 Workspace — the live control room for the classify -> resolve pipeline.
 
 Every complaint flows: pending -> classified | escalated -> agent_triggered ->
-draft_ready | needs_review -> resolved. This page shows how many sit at each
+draft_ready | needs_review -> response_approved. This page shows how many sit at each
 stage right now (the durable status counts) with the transient Redis stream
 state layered on top, and lets an operator push a batch of pending complaints
 into classification or escalated ones into the resolution agent, then watch
@@ -33,7 +33,12 @@ def _stage_board(board: dict) -> None:
         f"{board['draft_ready'] + board['needs_review']:,}",
         help=f"draft ready {board['draft_ready']:,} + agent failed {board['needs_review']:,}",
     )
-    cols[4].metric("Resolved", f"{board['resolved']:,}", help="Human approved — closed")
+    cols[4].metric(
+        "Response approved",
+        f"{board['response_approved']:,}",
+        help="Saved text approved; delivery and outcome unrecorded",
+    )
+    st.caption(f"Legacy approvals: {board['resolved']:,}; delivery and outcomes unknown.")
     st.metric(
         "Classification unavailable — needs triage",
         f"{board['classification_unavailable']:,}",

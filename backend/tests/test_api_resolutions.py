@@ -135,6 +135,14 @@ async def _audit_events(factory) -> list[AuditLog]:
         return (await s.exec(select(AuditLog))).all()
 
 
+async def _identity(client, cid):
+    response = await client.get(LATEST_URL.format(id=cid))
+    if response.status_code == 404:
+        return {"resolution_id": str(uuid.uuid4()), "expected_case_version": 1}
+    draft = response.json()
+    return {"resolution_id": draft["id"], "expected_case_version": draft["case_version"]}
+
+
 class TestGenerate:
     @pytest.mark.parametrize("stale", [False, True])
     async def test_retained_labels_after_outage_are_not_drafting_input(
@@ -248,16 +256,16 @@ class TestApprove:
         cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
         rid = await _seed_resolution(factory, cid)
 
-        r = await client.post(APPROVE_URL.format(id=cid))
+        r = await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
         assert r.status_code == 200, r.text
         body = r.json()
         assert body["action"] == "approved"
         assert body["resolution_id"] == str(rid)
-        assert body["complaint_status"] == "resolved"
+        assert body["complaint_status"] == "response_approved"
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.resolved.value
+            assert c.status == ComplaintStatus.response_approved.value
         events = await _audit_events(factory)
         assert events[0].event == "resolution_approved"
         assert events[0].metadata_["resolution_id"] == str(rid)
@@ -265,20 +273,20 @@ class TestApprove:
     async def test_failed_draft_is_not_approvable(self, client, factory):
         cid = await _seed_complaint(factory, status=ComplaintStatus.needs_review)
         await _seed_resolution(factory, cid, guardrail_status=GuardrailStatus.failed)
-        r = await client.post(APPROVE_URL.format(id=cid))
+        r = await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
         assert r.status_code == 409
         assert "guardrails" in r.json()["detail"]
 
     async def test_already_resolved_is_409(self, client, factory):
         cid = await _seed_complaint(factory, status=ComplaintStatus.resolved)
         await _seed_resolution(factory, cid)
-        r = await client.post(APPROVE_URL.format(id=cid))
+        r = await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
         assert r.status_code == 409
 
-    async def test_no_resolution_is_404(self, client, factory):
+    async def test_unknown_revision_is_409(self, client, factory):
         cid = await _seed_complaint(factory)
-        r = await client.post(APPROVE_URL.format(id=cid))
-        assert r.status_code == 404
+        r = await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
+        assert r.status_code == 409
 
 
 class TestReject:
@@ -296,7 +304,8 @@ class TestReject:
         )
         await _seed_resolution(factory, cid)
         response = await client.post(
-            REJECT_URL.format(id=cid), json={"feedback": "Please revise this draft"}
+            REJECT_URL.format(id=cid),
+            json={**await _identity(client, cid), "feedback": "Please revise this draft"},
         )
         assert response.status_code == 409
         assert await fake_redis.xrange(settings.resolution_queue) == []
@@ -310,7 +319,10 @@ class TestReject:
 
         r = await client.post(
             REJECT_URL.format(id=cid),
-            json={"feedback": "Cite the FCRA 30-day investigation window explicitly."},
+            json={
+                **await _identity(client, cid),
+                "feedback": "Cite the FCRA 30-day investigation window explicitly.",
+            },
         )
         assert r.status_code == 202, r.text
 
@@ -328,18 +340,26 @@ class TestReject:
     async def test_short_feedback_is_422(self, client, factory):
         cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
         await _seed_resolution(factory, cid)
-        r = await client.post(REJECT_URL.format(id=cid), json={"feedback": "bad"})
+        r = await client.post(
+            REJECT_URL.format(id=cid), json={**await _identity(client, cid), "feedback": "bad"}
+        )
         assert r.status_code == 422  # min_length=10 enforced by the schema
 
-    async def test_no_resolution_is_404(self, client, factory):
+    async def test_unknown_revision_is_409(self, client, factory):
         cid = await _seed_complaint(factory)
-        r = await client.post(REJECT_URL.format(id=cid), json={"feedback": "needs more empathy"})
-        assert r.status_code == 404
+        r = await client.post(
+            REJECT_URL.format(id=cid),
+            json={**await _identity(client, cid), "feedback": "needs more empathy"},
+        )
+        assert r.status_code == 409
 
     async def test_resolved_is_409(self, client, factory):
         cid = await _seed_complaint(factory, status=ComplaintStatus.resolved)
         await _seed_resolution(factory, cid)
-        r = await client.post(REJECT_URL.format(id=cid), json={"feedback": "needs more empathy"})
+        r = await client.post(
+            REJECT_URL.format(id=cid),
+            json={**await _identity(client, cid), "feedback": "needs more empathy"},
+        )
         assert r.status_code == 409
 
 
@@ -376,7 +396,10 @@ class TestWriterGate:
         cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
         await _seed_resolution(factory, cid)
         async with self._viewer_client(factory, fake_redis) as ac:
-            r = await ac.post(REJECT_URL.format(id=cid), json={"feedback": "needs more empathy"})
+            r = await ac.post(
+                REJECT_URL.format(id=cid),
+                json={**await _identity(ac, cid), "feedback": "needs more empathy"},
+            )
         assert r.status_code == 403
 
     async def test_viewer_can_still_read_latest(self, factory, fake_redis):
@@ -406,3 +429,94 @@ class TestVersionUniqueness:
         cid = await _seed_complaint(factory)
         await _seed_resolution(factory, cid, version=1)
         await _seed_resolution(factory, cid, version=2)  # must not raise
+
+
+class TestExactReview:
+    @pytest.mark.parametrize("action", ["approve", "reject"])
+    @pytest.mark.parametrize(
+        "body",
+        [
+            {},
+            {"expected_case_version": 1},
+            {"resolution_id": "00000000-0000-0000-0000-000000000001"},
+        ],
+    )
+    async def test_old_clients_fail_closed(self, client, factory, action, body):
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        await _seed_resolution(factory, cid)
+        if action == "reject":
+            body = {**body, "feedback": "Please clarify the response"}
+        response = await client.post(f"/api/v1/resolutions/{cid}/{action}", json=body)
+        assert response.status_code == 422
+        assert await _audit_events(factory) == []
+
+    @pytest.mark.parametrize(
+        "change", ["new_draft", "case_version", "input_revision", "cross_case"]
+    )
+    async def test_identity_and_version_conflicts_preserve_state(self, client, factory, change):
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        rid = await _seed_resolution(factory, cid)
+        body = await _identity(client, cid)
+        if change == "new_draft":
+            await _seed_resolution(factory, cid, version=2, draft_text="A new draft")
+        elif change == "cross_case":
+            other = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+            body["resolution_id"] = str(await _seed_resolution(factory, other))
+        else:
+            async with factory() as session:
+                case = await session.get(Complaint, cid)
+                setattr(case, change, 2)
+                session.add(case)
+                await session.commit()
+        response = await client.post(APPROVE_URL.format(id=cid), json=body)
+        assert response.status_code == 409
+        assert "Reload" in response.json()["detail"]
+        assert await _audit_events(factory) == []
+        async with factory() as session:
+            assert (await session.get(Complaint, cid)).status == ComplaintStatus.draft_ready
+            assert (await session.get(Resolution, rid)).draft_text != "A new draft"
+
+    async def test_rejection_permanently_invalidates_revision(self, client, factory):
+        from app.models.review_event import ReviewEvent
+
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        rid = await _seed_resolution(factory, cid)
+        original = await _identity(client, cid)
+        rejected = await client.post(
+            REJECT_URL.format(id=cid), json={**original, "feedback": "Please revise this response"}
+        )
+        assert rejected.status_code == 202
+        # Refreshing only the case version must not make rejected text approvable.
+        fresh = await _identity(client, cid)
+        response = await client.post(APPROVE_URL.format(id=cid), json=fresh)
+        assert response.status_code == 409
+        async with factory() as session:
+            events = (await session.exec(select(ReviewEvent))).all()
+            assert len(events) == 1
+            assert events[0].action == "rejected"
+            assert events[0].resolution_id == rid
+        assert (await client.get(LATEST_URL.format(id=cid))).json()["review_action"] == "rejected"
+
+    async def test_enqueue_failure_preserves_rejection_and_allows_explicit_retry(
+        self, client, factory, monkeypatch
+    ):
+        from app.models.review_event import ReviewEvent
+
+        cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
+        await _seed_resolution(factory, cid)
+        body = {**await _identity(client, cid), "feedback": "Please revise this response"}
+
+        async def unavailable(*args, **kwargs):
+            raise ConnectionError("synthetic queue outage")
+
+        monkeypatch.setattr("app.api.routes.resolutions.enqueue_resolution", unavailable)
+        response = await client.post(REJECT_URL.format(id=cid), json=body)
+        assert response.status_code == 503
+        assert "saved" in response.json()["detail"]
+        async with factory() as session:
+            case = await session.get(Complaint, cid)
+            assert (case.status, case.case_version) == (ComplaintStatus.needs_review, 3)
+            assert len((await session.exec(select(ReviewEvent))).all()) == 1
+        assert (
+            await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
+        ).status_code == 409

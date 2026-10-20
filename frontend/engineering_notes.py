@@ -47,10 +47,10 @@ Retrieval relevance and latency need workload-specific evaluation.
 provide signals. They do not establish factual/legal accuracy. The current UI can
 show an unrun tone layer as passed; inspect actual recorded violations and context.
 
-**Review integrity still needs work.** Editing the displayed draft does not save
-it. Approval currently selects a stored draft by complaint rather than requiring
-the visible draft identity/version. The resulting resolved label records approval,
-not delivery or a verified customer outcome.
+**Exact saved-draft review.** Approval sends the displayed draft ID and case
+version. A short case lock and immutable review event bind the decision to that
+text; stale submissions return a reload conflict. Saved human edits remain
+unfinished. Response approval does not record delivery or a customer outcome.
 """,
     "Analytics": """
 **Mixed sources.** SQL produces complaint aggregates; the company table supplements
@@ -77,8 +77,8 @@ unknown pricing are not fully represented. A zero cost is not proof of a free ca
 and the total is not the cost of operating or processing the whole corpus.
 
 **Provider failure is distinct.** Provider `none` means no model answered;
-`was_fallback` indicates a cloud response after local failure. The reviewed
-baseline's deterministic urgency-3 result is not a reliable manual-triage state.
+`was_fallback` indicates a cloud response after local failure. Unavailable
+classification records no new label; retained previous labels are marked stale.
 
 **Scale needs measurement.** Some latency/violation endpoints load matching rows
 into Python. A bounded response does not imply bounded query or memory use.
@@ -86,12 +86,12 @@ into Python. A bounded response does not imply bounded query or memory use.
     "Workspace": """
 **Business state and queue state differ.** Case counts read PostgreSQL status;
 Redis supplies stream activity. The reads are not a single consistent snapshot,
-and approval currently uses the resolved label without recording a real outcome.
+and response approval does not record delivery or a real customer outcome.
 
-**Publication is not atomic.** Producers share message helpers, but a request can
-publish before its database commit. Replay can overwrite later state. Redis
-consumer groups alone do not guarantee lossless work or prevent duplicate effects;
-durable jobs and stale-worker fencing remain required improvements.
+**Publication is not atomic.** Producers commit before publishing a versioned
+message; a crash between these steps can strand work. Workers fence stale results
+before persistence. Redis consumer groups still allow duplicate inference calls;
+durable jobs, leases and reconciliation remain unfinished.
 
 **Bounded submission.** A staff batch request has a size cap, but existing queued
 work, retries and provider limits still determine completion time.

@@ -23,8 +23,9 @@ an implemented restriction on intake.
   not a verified account of remediation, and a retrieved neighbor is not a legal
   precedent or proof that a proposed response will work.
 - Imported, classified, drafted, approved, delivered, and resolved are different
-  counts. The current `resolved` status is set by approval; it does not establish
-  delivery, consumer satisfaction, or correction of a credit report.
+  counts. New approvals use `response_approved`; legacy `resolved` cases retain
+  unknown outcome markers. Neither establishes delivery, consumer satisfaction,
+  or correction of a credit report.
 - Drafts require a reviewer to check facts, cited sources, and commitments. Current
   pattern checks and tone scores do not certify legal accuracy or compliance.
 - Hosted configuration skips local inference. Cloud calls can contain complaint
@@ -40,9 +41,9 @@ complaint names Example Credit Bureau and contains no real identifying details.
    original text. Provider failure must be distinguished from a scored case.
 3. The reviewer checks retrieved public cases and reference material, then requests
    a draft that promises investigation rather than a particular result.
-4. The reviewer changes unsupported wording and checks exactly what will be stored
-   and approved. Saved human edits and exact-version approval are required workflow
-   improvements; the current editable text box is not a persisted revision editor.
+4. The reviewer rejects unsupported wording with feedback and reads the saved
+   revision. Approval binds its exact ID and case version. Saved human edits
+   remain a required workflow improvement; the current draft is read-only.
 5. Export or simulated delivery should be recorded separately from approval.
    Closure should require an explicit outcome, including unknown or unresolved.
    These outcome steps are proposed, not current application capabilities.

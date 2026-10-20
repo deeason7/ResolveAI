@@ -32,6 +32,7 @@ STATUS_OPTIONS = [
     "agent_triggered",
     "draft_ready",
     "needs_review",
+    "response_approved",
     "resolved",
 ]
 

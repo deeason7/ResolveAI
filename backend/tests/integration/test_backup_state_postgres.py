@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+import uuid
 
 import pytest
 import sqlalchemy as sa
@@ -62,8 +63,10 @@ async def test_export_uses_one_snapshot_during_concurrent_writes(pg_engine, tmp_
                 {"text": "Changed after snapshot", "id": complaint_id},
             )
             await conn.execute(
-                sa.text("UPDATE resolutions SET draft_text = :text WHERE complaint_id = :id"),
-                {"text": "Changed after snapshot", "id": complaint_id},
+                sa.text(
+                    "INSERT INTO resolutions (id, complaint_id, version, draft_text, guardrail_status, created_at, updated_at) VALUES (:id, :case, 2, 'New saved revision', 'passed', CURRENT_TIMESTAMP, CURRENT_TIMESTAMP)"
+                ),
+                {"id": uuid.uuid4(), "case": complaint_id},
             )
         writer_done.set()
 

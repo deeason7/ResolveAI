@@ -57,17 +57,18 @@ Record the case ID, then:
 1. Watch the case enter the queue. Report observed completion and latency; do not
    promise a classification or a fixed response time in advance.
 2. Inspect the narrative and classification together. If no provider answered,
-   describe the failure instead of presenting the deterministic fallback as a
-   prediction. The reviewed baseline uses urgency 3, not maximum severity.
+   show the unavailable outcome and unknown urgency, or explicitly stale retained
+   labels. No provider output means no new classification.
 3. Request a draft. Inspect tool results, proposed text and check outcomes. A
    citation-title match does not verify the law or support every sentence.
 4. Reject an unsupported promise with concrete feedback and inspect the new text.
-   The editable draft box is currently for copy-out: edits are not saved.
-5. Before any approval, compare the visible and stored draft. Exact revision
-   approval is an outstanding integrity requirement. Do not demonstrate this
-   baseline as suitable for real customer decisions.
-6. Explain that the application's `resolved` label currently records approval.
-   Delivery, remediation and customer satisfaction have not been measured.
+   The displayed saved draft is read-only; saved human edits are not yet available.
+5. Before approval, read the exact saved draft. Approval submits its ID and displayed
+   case version. A stale submission returns a conflict; reload and read the current
+   text before trying again.
+6. Explain that `response_approved` records approval of saved text. Legacy `resolved`
+   cases retain unknown outcome markers. Delivery, remediation and customer
+   satisfaction have not been measured.
 
 ## Failure demonstration and cleanup
 

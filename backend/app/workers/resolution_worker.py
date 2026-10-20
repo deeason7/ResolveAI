@@ -20,11 +20,9 @@ Status choreography (see ComplaintStatus):
 the dashboard can show in-flight work and a crash mid-run is observable (the
 complaint sticks at agent_triggered with the message still pending in the PEL).
 
-Redelivery is at-least-once, so a crash after the final commit but before the
-ack can produce a duplicate draft version. That's an extra row in the revision
-history, not consumer-facing damage — the same tradeoff the graph counters
-made — and the draft_ready guard below catches the common stale-redelivery
-case.
+Versioned messages may execute more than once, but only a result matching the
+current case and input versions can commit. External inference runs without a
+database lock; completion locks the case and rechecks eligibility.
 
 Runs at concurrency 1: drafting + judging is several seconds of LLM time per
 complaint, and the volume of escalated complaints is a trickle, not a flood.
@@ -38,7 +36,6 @@ import os
 import signal
 import socket
 import uuid
-from datetime import datetime
 from typing import Any, Protocol
 
 import redis.asyncio as aioredis
@@ -60,6 +57,7 @@ from app.services.agent.orchestrator import (
     AgentResult,
     ResolutionAgent,
 )
+from app.services.case_transitions import advance_case, lock_case, message_versions
 from app.services.graph_store import GraphStore, get_default_graph_store
 from app.services.guardrails import GuardrailEngine
 from app.services.llm_client import LLMClient, get_llm_client
@@ -86,14 +84,6 @@ _OUTCOME_MAP: dict[str, tuple[GuardrailStatus, ComplaintStatus]] = {
     STATUS_UNAVAILABLE: (GuardrailStatus.escalated, ComplaintStatus.needs_review),
 }
 
-# A no-feedback redelivery for these statuses is stale: the work it asked for
-# is already done (or the case is closed). Explicit feedback always reprocesses.
-# Value strings, not enum members: the status column is a plain VARCHAR, so rows
-# loaded from the DB carry str values even though we assign enum members.
-_SKIP_WITHOUT_FEEDBACK = frozenset(
-    {ComplaintStatus.draft_ready.value, ComplaintStatus.resolved.value}
-)
-
 
 class _AgentLike(Protocol):
     """What the worker needs from an agent — lets tests stub the whole pipeline."""
@@ -105,6 +95,8 @@ async def enqueue_resolution(
     redis_client: aioredis.Redis,
     complaint_id: uuid.UUID | str,
     *,
+    expected_case_version: int,
+    input_revision: int,
     feedback: str | None = None,
     stream: str | None = None,
 ) -> str:
@@ -115,7 +107,11 @@ async def enqueue_resolution(
     ``feedback`` carries a human reviewer's rejection notes into the next draft.
     """
     stream = stream or default_settings.resolution_queue
-    fields: dict[str, str] = {"complaint_id": str(complaint_id)}
+    fields: dict[str, str] = {
+        "complaint_id": str(complaint_id),
+        "expected_case_version": str(expected_case_version),
+        "input_revision": str(input_revision),
+    }
     if feedback:
         fields["feedback"] = feedback
     return await redis_client.xadd(stream, fields, **trim_kwargs())
@@ -263,6 +259,12 @@ class ResolutionWorker:
             logger.warning("dropping message with bad complaint_id: %r", raw_id)
             return  # poison -> ack
 
+        versions = message_versions(fields)
+        if versions is None:
+            logger.warning(
+                "dropping unversioned or malformed resolution trigger for %s", complaint_id
+            )
+            return
         feedback = fields.get("feedback") or None
 
         async with self.session_factory() as session:
@@ -271,15 +273,8 @@ class ResolutionWorker:
                 logger.warning("complaint %s not found; dropping", complaint_id)
                 return  # poison -> ack
 
-            # EnumString round-trips status as the enum, so .value is always safe.
-            status_value = complaint.status.value
-            if status_value in _SKIP_WITHOUT_FEEDBACK and not feedback:
-                logger.info(
-                    "complaint %s already %s; dropping stale trigger",
-                    complaint_id,
-                    status_value,
-                )
-                return  # duplicate/stale delivery -> ack
+            if not self._eligible(complaint, versions):
+                return
 
             classification = self._rebuild_classification(complaint)
             if classification is None:
@@ -290,11 +285,8 @@ class ResolutionWorker:
             if feedback:
                 previous_draft_text = await self._latest_draft_text(session, complaint_id)
 
-            # Own transaction, before the slow part: the triage queue shows the
-            # agent working, and a crash mid-run leaves a visible in-flight state.
-            complaint.status = ComplaintStatus.agent_triggered
-            complaint.updated_at = datetime.utcnow()
-            session.add(complaint)
+            # End the read transaction before slow external work. No claim
+            # transition: a crashed attempt can retry the same versioned message.
             await session.commit()
 
             agent = self.agent_factory(
@@ -305,10 +297,10 @@ class ResolutionWorker:
             )
             result: AgentResult = await agent.run()
 
-            await self._persist(session, complaint, result)
+            await self._persist(session, complaint, result, versions=versions)
 
         logger.info(
-            "complaint %s resolved by agent: status=%s attempts=%d drafts=%d judge_calls=%d",
+            "complaint %s inference finished: status=%s attempts=%d drafts=%d judge_calls=%d",
             complaint_id,
             result.status,
             result.attempts,
@@ -317,7 +309,7 @@ class ResolutionWorker:
         )
 
     async def _persist(
-        self, session: Any, complaint: Complaint, result: AgentResult
+        self, session: Any, complaint: Complaint, result: AgentResult, *, versions: tuple[int, int]
     ) -> Resolution | None:
         """One transaction: Resolution row (if drafted), status, and all LLMLogs.
 
@@ -325,12 +317,18 @@ class ResolutionWorker:
         with no LLMLogs under-reports spend, and orphan LLMLogs point at a draft
         that doesn't exist. Same consistency boundary as classification.
         """
+        complaint = await lock_case(session, complaint.id)
+        if complaint is None or not self._eligible(complaint, versions):
+            await session.rollback()
+            logger.info("discarded stale resolution result")
+            return None
         resolution: Resolution | None = None
         if result.drafted is not None:
             guardrail_status, complaint_status = _OUTCOME_MAP[result.status]
             resolution = Resolution(
                 complaint_id=complaint.id,
                 version=await self._next_version(session, complaint.id),
+                input_revision=complaint.input_revision,
                 draft_text=result.drafted.response_text,
                 guardrail_status=guardrail_status,
                 guardrail_notes=result.guardrail_feedback or None,
@@ -348,7 +346,7 @@ class ResolutionWorker:
             complaint_status = ComplaintStatus.needs_review
 
         complaint.status = complaint_status
-        complaint.updated_at = datetime.utcnow()
+        advance_case(complaint)
         session.add(complaint)
 
         for call in result.llm_calls:
@@ -378,6 +376,15 @@ class ResolutionWorker:
 
         await session.commit()
         return resolution
+
+    @staticmethod
+    def _eligible(complaint: Complaint, versions: tuple[int, int]) -> bool:
+        return (
+            (complaint.case_version, complaint.input_revision) == versions
+            and complaint.status in {ComplaintStatus.escalated, ComplaintStatus.agent_triggered}
+            and not complaint.classification_stale
+            and complaint.classification_outcome != ClassificationState.unavailable
+        )
 
     @staticmethod
     def _rebuild_classification(complaint: Complaint) -> ComplaintClassification | None:
@@ -411,12 +418,7 @@ class ResolutionWorker:
 
     @staticmethod
     async def _next_version(session: Any, complaint_id: uuid.UUID) -> int:
-        """1 + the highest existing version for this complaint (1 when none).
-
-        Safe at concurrency 1 (our deployment); two workers racing the same
-        complaint could pick the same version — add a unique constraint before
-        ever scaling out.
-        """
+        """Allocate while the caller holds the parent case lock."""
         stmt = select(func.max(Resolution.version)).where(Resolution.complaint_id == complaint_id)
         current = (await session.exec(stmt)).one()
         return (current or 0) + 1

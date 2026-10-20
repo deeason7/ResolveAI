@@ -27,7 +27,9 @@ async def test_unavailable_result_and_unknown_usage_commit_together(pg_sessionma
         classifier=Mock(classify=Mock(return_value=_outcome(succeeded=False))),
         session_factory=pg_sessionmaker,
     )
-    await worker.process_message({"complaint_id": str(case.id)})
+    await worker.process_message(
+        {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(case.id)}
+    )
     async with pg_sessionmaker() as session:
         stored = await session.get(Complaint, case.id)
         assert stored.classification_outcome == ClassificationState.unavailable
@@ -62,7 +64,11 @@ async def test_human_commit_during_inference_wins(pg_sessionmaker, succeeded):
         classifier=Mock(classify=inference),
         session_factory=pg_sessionmaker,
     )
-    task = asyncio.create_task(worker.process_message({"complaint_id": str(case.id)}))
+    task = asyncio.create_task(
+        worker.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(case.id)}
+        )
+    )
     try:
         assert await asyncio.to_thread(started.wait, 5)
         # Independent transaction commits while the worker is outside its row lock.

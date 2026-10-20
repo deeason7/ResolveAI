@@ -48,6 +48,7 @@ async def seed_rows(engine):
     from app.models.complaint_label import ComplaintLabel
     from app.models.llm_log import LLMLog
     from app.models.resolution import GuardrailStatus, Resolution
+    from app.models.review_event import ReviewEvent
     from app.models.user import User, UserRole
 
     factory = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
@@ -61,7 +62,8 @@ async def seed_rows(engine):
         historic = Complaint(
             cfpb_complaint_id="synthetic-001",
             narrative="Synthetic duplicate charge.",
-            status=ComplaintStatus.resolved,
+            status=ComplaintStatus.response_approved,
+            case_version=2,
             sentiment="negative",
             urgency=5,
             classification_outcome=ClassificationState.unavailable,
@@ -84,14 +86,26 @@ async def seed_rows(engine):
         )
         session.add_all([user, historic, live])
         await session.flush()
+        reviewed = Resolution(
+            complaint_id=historic.id,
+            version=1,
+            draft_text="Exact reviewed text — preserved.",
+            guardrail_status=GuardrailStatus.passed,
+            guardrail_violations=[],
+        )
+        session.add(reviewed)
+        await session.flush()
         session.add_all(
             [
-                Resolution(
+                ReviewEvent(
                     complaint_id=historic.id,
-                    version=1,
-                    draft_text="Exact reviewed text — preserved.",
-                    guardrail_status=GuardrailStatus.passed,
-                    guardrail_violations=[],
+                    resolution_id=reviewed.id,
+                    user_id=user.id,
+                    action="approved",
+                    expected_case_version=1,
+                    case_version=2,
+                    input_revision=1,
+                    draft_sha256=hashlib.sha256(reviewed.draft_text.encode()).hexdigest(),
                 ),
                 ComplaintLabel(
                     complaint_id=historic.id,
@@ -165,6 +179,7 @@ async def test_default_export_contains_complete_state(backup_engine, tmp_path):
     assert manifest["format_version"] == 2
     assert manifest["includes_complaints"] is True
     assert manifest["row_counts"]["complaints"] == 2
+    assert manifest["row_counts"]["review_events"] == 1
     assert set(manifest["tables"]) == set(SQLModel.metadata.tables)
     assert manifest["alembic_revision"] == "test-schema-v1"
     assert archive.stat().st_mode & 0o777 == 0o700

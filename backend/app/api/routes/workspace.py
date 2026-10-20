@@ -16,7 +16,6 @@ of each stream's message shape.
 from __future__ import annotations
 
 import logging
-from datetime import datetime
 
 import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query, Request
@@ -31,6 +30,7 @@ from app.middleware.rate_limit import limiter
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
 from app.models.user import User
 from app.schemas.workspace import EnqueueResult, StreamInfo, WorkspaceBoard
+from app.services.case_transitions import TERMINAL_STATUSES, advance_case, lock_case
 from app.workers.classification_worker import enqueue_complaint
 from app.workers.resolution_worker import enqueue_resolution
 
@@ -96,12 +96,13 @@ async def board(
         draft_ready=n(ComplaintStatus.draft_ready),
         needs_review=n(ComplaintStatus.needs_review),
         resolved=n(ComplaintStatus.resolved),
+        response_approved=n(ComplaintStatus.response_approved),
         total=sum(int(c) for c in counts.values()),
         classification_unavailable=(
             await session.exec(
                 select(func.count(Complaint.id)).where(
                     Complaint.classification_outcome == ClassificationState.unavailable,
-                    Complaint.status != ComplaintStatus.resolved,
+                    Complaint.status.not_in(TERMINAL_STATUSES),
                 )
             )
         ).one(),
@@ -128,11 +129,17 @@ async def enqueue_classification(
     """
     ids = (
         await session.exec(
-            select(Complaint.id).where(Complaint.status == ComplaintStatus.pending).limit(limit)
+            select(Complaint).where(Complaint.status == ComplaintStatus.pending).limit(limit)
         )
     ).all()
-    for complaint_id in ids:
-        await enqueue_complaint(redis, complaint_id)
+    await session.commit()
+    for complaint in ids:
+        await enqueue_complaint(
+            redis,
+            complaint.id,
+            expected_case_version=complaint.case_version,
+            input_revision=complaint.input_revision,
+        )
     logger.info("workspace: enqueued %d complaints for classification", len(ids))
     return EnqueueResult(enqueued=len(ids), stream=settings.classification_queue)
 
@@ -150,8 +157,8 @@ async def enqueue_resolution_batch(
 
     Mirrors /resolutions/{id}/generate for a batch: flip escalated ->
     agent_triggered in this transaction so a re-run can't double-draft the same
-    complaint, flush, then XADD each. If an enqueue raises, the request fails and
-    the session rolls the flips back with it.
+    complaint. Commit before Redis I/O; on dispatch failure invalidate the
+    uncertain attempts and return still-current cases to escalated for retry.
     """
     complaints = (
         await session.exec(
@@ -161,17 +168,38 @@ async def enqueue_resolution_batch(
                 Complaint.classification_outcome != ClassificationState.unavailable,
                 Complaint.classification_stale.is_(False),
             )
+            .order_by(Complaint.id)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
     ).all()
     for complaint in complaints:
         # Flip escalated -> agent_triggered (mirrors /generate's per-object flip)
         # so a re-run can't re-select and double-draft the same complaint.
         complaint.status = ComplaintStatus.agent_triggered
-        complaint.updated_at = datetime.utcnow()
+        advance_case(complaint)
         session.add(complaint)
-    await session.flush()
-    for complaint in complaints:
-        await enqueue_resolution(redis, complaint.id)
+    attempts = [(c.id, c.case_version, c.input_revision) for c in complaints]
+    await session.commit()
+    try:
+        for complaint_id, case_version, input_revision in attempts:
+            await enqueue_resolution(
+                redis,
+                complaint_id,
+                expected_case_version=case_version,
+                input_revision=input_revision,
+            )
+    except Exception:
+        # Invalidate uncertain/undispatched attempts so an old message cannot
+        # race a later explicit retry. Durable dispatch is separate work.
+        for complaint_id, case_version, _ in attempts:
+            current = await lock_case(session, complaint_id)
+            if current and current.case_version == case_version:
+                current.status = ComplaintStatus.escalated
+                advance_case(current)
+                session.add(current)
+        await session.commit()
+        raise
+
     logger.info("workspace: enqueued %d complaints for resolution", len(complaints))
     return EnqueueResult(enqueued=len(complaints), stream=settings.resolution_queue)

@@ -35,11 +35,30 @@ bulk import additionally requires the `admin` role.
 
 | Method | Path | Returns | Notes |
 |---|---|---|---|
-| POST | `/{complaint_id}/generate` | **202** queued | 409 if already running / already resolved / not classified yet |
+| POST | `/{complaint_id}/generate` | **202** queued | 409 if already running / response approved / no current classification |
 | GET | `/{complaint_id}` | Latest draft | Draft text, per-layer guardrail violations, reasoning steps, version |
 | GET | `/{complaint_id}/revisions` | All versions | |
-| POST | `/{complaint_id}/approve` | 200 outcome | Gated to drafts that passed guardrails; 409 if already resolved |
-| POST | `/{complaint_id}/reject` | **202** queued | Body: `feedback` (min 10 chars) — fed into the regeneration prompt |
+| POST | `/{complaint_id}/approve` | 200 outcome | Body: `resolution_id`, `expected_case_version`; saved draft must pass guardrails |
+| POST | `/{complaint_id}/reject` | **202** queued | Body: `resolution_id`, `expected_case_version`, `feedback` (10–2000 chars) |
+
+The latest-draft and revision responses include `case_version`, `input_revision`,
+`legacy_provenance` and `review_action`. Send the exact displayed draft's `id`
+and `case_version` as `resolution_id` and `expected_case_version`. A stale case,
+older draft, cross-case ID or previously reviewed revision returns an actionable
+409. Missing identity returns 422; there is no implicit latest-draft approval.
+Reload and read the saved response before submitting another decision.
+
+Approval changes the case to `response_approved`: the exact saved response was
+approved, but delivery and customer outcome are unrecorded. Legacy `resolved`
+rows retain that status with `legacy_approval_outcome_unknown=true`. They do not
+establish delivery or resolution. Every new decision records an immutable review
+event with the reviewer, draft ID, versions, decision and text hash.
+
+Generation and rejection commit their case changes before contacting Redis. If
+dispatch fails or its outcome is uncertain, the attempt is invalidated and the
+API returns 503 with a reload/retry explanation. A saved rejection remains
+saved. Durable transactional dispatch is still pending; see
+[review concurrency and rollout](review_concurrency.md).
 
 ## Analytics — `/analytics`
 
@@ -79,7 +98,7 @@ bulk import additionally requires the `admin` role.
   K-nearest endpoints (`/similar`) return bare `items` — similarity search
   doesn't paginate.
 - **409 means "the API is being honest"**: generate/approve conflicts state
-  their reason (already running, already resolved, not classified) rather
+  their reason (case changed, response approved, no current classification) rather
   than failing generically.
 - **202 means async**: generate/reject queue work for the resolution
   worker — poll the resolution endpoints or watch the dashboard.

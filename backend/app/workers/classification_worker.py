@@ -34,12 +34,12 @@ from typing import Any
 
 import redis.asyncio as aioredis
 from redis.exceptions import ResponseError
-from sqlmodel import select
 
 from app.config import Settings
 from app.config import settings as default_settings
 from app.database import AsyncSessionLocal
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.services.case_transitions import advance_case, lock_case, message_versions
 from app.services.classifier import Classifier
 from app.services.embedder import embed_text
 from app.services.graph_store import GraphStore, get_default_graph_store
@@ -73,6 +73,8 @@ async def enqueue_complaint(
     redis_client: aioredis.Redis,
     complaint_id: uuid.UUID | str,
     *,
+    expected_case_version: int,
+    input_revision: int,
     stream: str | None = None,
 ) -> str:
     """Producer side of the stream contract: XADD a complaint id for classifying.
@@ -81,7 +83,15 @@ async def enqueue_complaint(
     one definition of the message shape instead of hand-rolling XADD calls.
     """
     stream = stream or default_settings.classification_queue
-    return await redis_client.xadd(stream, {"complaint_id": str(complaint_id)}, **trim_kwargs())
+    return await redis_client.xadd(
+        stream,
+        {
+            "complaint_id": str(complaint_id),
+            "expected_case_version": str(expected_case_version),
+            "input_revision": str(input_revision),
+        },
+        **trim_kwargs(),
+    )
 
 
 class ClassificationWorker:
@@ -217,25 +227,22 @@ class ClassificationWorker:
             logger.warning("dropping message with bad complaint_id: %r", raw_id)
             return  # poison -> ack
 
+        versions = message_versions(fields)
+        if versions is None:
+            logger.warning(
+                "dropping unversioned or malformed classification trigger for %s", complaint_id
+            )
+            return
+
         async with self.session_factory() as session:
             complaint = await session.get(Complaint, complaint_id)
             if complaint is None:
                 logger.warning("complaint %s not found; dropping", complaint_id)
                 return  # poison -> ack
-            if (
-                complaint.status == ComplaintStatus.resolved
-                or complaint.classification_source == "manual"
-            ):
-                return  # redelivery must not replace a human decision
-            original = (
-                complaint.narrative,
-                complaint.product,
-                complaint.issue,
-                complaint.company,
-                complaint.status,
-                complaint.updated_at,
-                complaint.classification_outcome,
-            )
+            if not self._eligible(complaint, versions):
+                return
+            # No open read transaction during provider work.
+            await session.commit()
 
             # The LLM call is synchronous and network-bound; trampoline it off the
             # event loop so blocking on Ollama doesn't stall the whole worker.
@@ -249,26 +256,8 @@ class ClassificationWorker:
             cls = outcome.classification
             # Re-read after inference so a manual decision made while the model
             # was running cannot be overwritten. The lock covers only writes.
-            complaint = (
-                await session.exec(
-                    select(Complaint)
-                    .where(Complaint.id == complaint_id)
-                    .with_for_update()
-                    .execution_options(populate_existing=True)
-                )
-            ).one_or_none()
-            if complaint is None:
-                return
-            current = (
-                complaint.narrative,
-                complaint.product,
-                complaint.issue,
-                complaint.company,
-                complaint.status,
-                complaint.updated_at,
-                complaint.classification_outcome,
-            )
-            if current != original or complaint.classification_source == "manual":
+            complaint = await lock_case(session, complaint_id)
+            if complaint is None or not self._eligible(complaint, versions):
                 logger.info("classification result discarded after case changed: %s", complaint_id)
                 return
 
@@ -300,7 +289,7 @@ class ClassificationWorker:
                 # not supply replacement labels or reopen a finished case.
                 if complaint.status == ComplaintStatus.pending:
                     complaint.status = ComplaintStatus.needs_review
-            complaint.updated_at = now
+            advance_case(complaint, inputs_changed=outcome.succeeded and cls is not None)
             session.add(complaint)
 
             # One transaction: the classification and its audit log land together.
@@ -325,12 +314,26 @@ class ClassificationWorker:
             )
             return
         if high:
-            await self._trigger_resolution(complaint_id, cls)
+            await self._trigger_resolution(complaint, cls)
 
         await self._index(complaint_id, complaint.narrative, complaint, cls)
         await self._update_graph(complaint)
 
-    async def _trigger_resolution(self, complaint_id: uuid.UUID, cls: Any) -> None:
+    @staticmethod
+    def _eligible(complaint: Complaint, versions: tuple[int, int]) -> bool:
+        return (
+            (complaint.case_version, complaint.input_revision) == versions
+            and complaint.status
+            in {
+                ComplaintStatus.pending,
+                ComplaintStatus.classified,
+                ComplaintStatus.escalated,
+                ComplaintStatus.needs_review,
+            }
+            and complaint.classification_source != "manual"
+        )
+
+    async def _trigger_resolution(self, complaint: Complaint, cls: Any) -> None:
         """Best-effort: hand the escalated complaint to the resolution agent.
 
         Postgres has already committed status=escalated, and THAT is the durable
@@ -339,9 +342,14 @@ class ClassificationWorker:
         Raising here would redeliver the classification message and re-run a
         multi-second LLM call to redo work that's already committed.
         """
+        complaint_id = complaint.id
         try:
             await enqueue_resolution(
-                self.redis, complaint_id, stream=self.settings.resolution_queue
+                self.redis,
+                complaint_id,
+                expected_case_version=complaint.case_version,
+                input_revision=complaint.input_revision,
+                stream=self.settings.resolution_queue,
             )
             logger.info(
                 "complaint %s is high-priority (urgency=%d sentiment=%s) — queued "

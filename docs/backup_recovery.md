@@ -89,3 +89,17 @@ nonempty targets, legacy formats and conflicting rows without partial restoratio
 The small synthetic drill establishes correctness for those fixtures. It does
 not measure production recovery time, storage durability, backup scheduling or
 hosted restore permissions. Follow [testing.md](testing.md) to reproduce it.
+
+
+## Exact-review schema compatibility
+
+Migration `e6b4a9d2c705` adds `review_events`, case/input versions and explicit
+legacy provenance markers. Default backups include the review table through the
+registered model inventory, preserving reviewer/draft relationships and hashes.
+The restore drill includes a reviewed response and its immutable event.
+
+A format-2 archive from an earlier schema must be restored with its matching
+application revision into an empty database migrated to that archived revision,
+then upgraded forward. The current restore refuses a mismatched table inventory
+or schema revision. Do not remove review history to make an old archive fit.
+Downgrading the review migration refuses to proceed once review events exist.

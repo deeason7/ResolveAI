@@ -17,6 +17,14 @@ import api_client
 import tour
 from api_client import ApiError
 from classification import can_generate, classification_label, classification_notice
+from review import (
+    SNAPSHOT_KEY,
+    approval_notice,
+    case_status_label,
+    displayed_draft,
+    review_error,
+    review_identity,
+)
 from theme import DEMO_HINT, SENTIMENT_BADGES
 
 HANDOFF_KEY = "detail_complaint_id"
@@ -63,7 +71,7 @@ def _header(c: dict) -> None:
     chips[1].metric("Intent", c["intent"] or "n/a")
     urgency_label = "Prior urgency (stale)" if c.get("classification_stale") else "Urgency"
     chips[2].metric(urgency_label, f"{c['urgency']} / 5" if c["urgency"] else "Unknown")
-    chips[3].metric("Status", c["status"])
+    chips[3].metric("Status", case_status_label(c["status"]))
 
 
 def _narrative_panel(c: dict) -> None:
@@ -174,26 +182,31 @@ def _reasoning(res: dict) -> None:
 
 def _review_actions(res: dict) -> None:
     demo = api_client.is_demo()
+    identity = review_identity(res)
+    disabled = demo or identity is None or res.get("review_action") is not None
     approve_col, reject_col, _ = st.columns([1, 1, 2])
     if approve_col.button(
         "✅ Approve",
         type="primary",
         use_container_width=True,
-        disabled=demo,
+        disabled=disabled,
         help=DEMO_HINT if demo else None,
     ):
         try:
-            outcome = api_client.approve_resolution(res["complaint_id"])
+            outcome = api_client.approve_resolution(res["complaint_id"], **identity)
         except ApiError as exc:
-            st.warning(exc.detail)
+            st.warning(review_error(exc))
         else:
-            st.toast(f"Approved v{outcome['version']} — complaint is now resolved.")
+            st.session_state.pop(SNAPSHOT_KEY, None)
+            st.toast(
+                f"Response v{outcome['version']} approved; delivery and outcome are unrecorded."
+            )
             st.rerun()
 
     with reject_col.popover(
         "❌ Reject…",
         use_container_width=True,
-        disabled=demo,
+        disabled=disabled,
         help=DEMO_HINT if demo else None,
     ):
         with st.form("reject_form", border=False):
@@ -206,10 +219,13 @@ def _review_actions(res: dict) -> None:
                     st.error("Give the agent at least a sentence of feedback.")
                 else:
                     try:
-                        api_client.reject_resolution(res["complaint_id"], feedback.strip())
+                        api_client.reject_resolution(
+                            res["complaint_id"], feedback.strip(), **identity
+                        )
                     except ApiError as exc:
-                        st.warning(exc.detail)
+                        st.warning(review_error(exc))
                     else:
+                        st.session_state.pop(SNAPSHOT_KEY, None)
                         st.toast("Rejected — regeneration queued with your feedback.")
                         st.rerun()
 
@@ -217,7 +233,8 @@ def _review_actions(res: dict) -> None:
 def _resolution_panel(c: dict) -> None:
     st.subheader("Resolution")
     try:
-        res = api_client.get_resolution(c["id"])
+        reload = st.button("Reload current draft", key=f"reload_draft_{c['id']}")
+        res = displayed_draft(st.session_state, c["id"], api_client.get_resolution, reload=reload)
     except ApiError as exc:
         if exc.status_code != 404:
             raise
@@ -230,12 +247,25 @@ def _resolution_panel(c: dict) -> None:
     _guardrail_strip(res)
     _reasoning(res)
 
-    st.text_area("Draft response", value=res["draft_text"], height=280, key=f"draft_{res['id']}")
+    with st.container(border=True):
+        st.text(res["draft_text"])
     st.caption(
-        "Edits above are for copying out — approval applies the stored draft. "
-        "To change the draft itself, reject it with feedback and the agent regenerates."
+        "Approval records this exact saved text. Reject with feedback to request a new revision."
     )
-    _review_actions(res)
+    st.download_button(
+        "Download saved response",
+        res["draft_text"],
+        file_name=f"response-v{res['version']}.txt",
+        mime="text/plain",
+    )
+    if res.get("legacy_provenance"):
+        st.caption("Legacy draft: original input provenance is unknown.")
+    if c["status"] in {"resolved", "response_approved"}:
+        st.info(approval_notice(c, res))
+    else:
+        _review_actions(res)
+        if res.get("review_action") == "rejected" and c["status"] == "needs_review":
+            _generate_button(c)
 
     revisions = api_client.list_revisions(c["id"])
     if len(revisions) > 1:

@@ -38,9 +38,8 @@ sequenceDiagram
     participant W as Classification worker
     participant L as Configured model provider
     U->>API: Submit complaint
-    API->>PG: Insert and flush pending complaint
-    API->>R: Publish classification message
-    API->>PG: Dependency commits transaction
+    API->>PG: Insert and commit pending complaint
+    API->>R: Publish versioned classification message
     API-->>U: Complaint ID
     R->>W: Read or reclaim message
     W->>L: Classify without holding a row lock
@@ -48,16 +47,17 @@ sequenceDiagram
     W->>R: Acknowledge message
 ```
 
-At the reviewed baseline, publishing precedes the request transaction's commit.
-A worker may race the insert, and a database rollback can leave a queued message.
-A lost enqueue can leave pending work without a durable job record. Replaying a
-message can also overwrite later case state. There is no verified automatic
-reconciliation guarantee. Transactional job persistence and stale-result fencing
-are required improvements, not properties of the current stream implementation.
+Publication follows the database commit, leaving a crash window between the two
+systems. A lost enqueue can still strand work without a durable job record;
+automatic reconciliation is not yet implemented. Versioned messages fence stale
+results, but do not guarantee durable delivery or exactly-once external calls.
 
-Synchronous model calls are offloaded with `asyncio.to_thread`. The resolution
-worker records `agent_triggered` in an initial transaction, then persists the
-result and logs in another. The database lock does not span model inference.
+Synchronous model calls are offloaded with `asyncio.to_thread`. Both workers end
+their read transaction before inference and lock/recheck case and input versions
+at completion. Classification-triggered drafts remain `escalated` while running;
+explicit requests mark `agent_triggered` when scheduled. Worker claims do not
+advance versions, so a crashed attempt can retry its message. See
+[review concurrency](review_concurrency.md) for invariants and rollout limits.
 
 ## Classification and drafting
 
@@ -74,12 +74,11 @@ existing lifecycle. Neither path starts drafting or updates derived indexes.
 Generation and regeneration reject unavailable/stale inputs. Successful fallback
 records the actual provider and fallback flag. Task latency includes all attempts.
 
-The worker skips terminal/manual-source cases and checks its original snapshot
-again under a short row lock before writing. This is a limited stale-write guard,
-not durable job leasing or complete input/version fencing. In-flight resolution
-workers still need that protection. The UI exposes a Needs triage filter and
-provenance notices; manual label editing and controlled retries remain unfinished.
-See [classification rollout](classification.md) for cutover and rollback limits.
+The classification worker skips terminal/manual-source cases. Both workers reject
+stale case/input versions before inference and when persisting results. Durable
+job identity and leases remain unfinished. The UI exposes a Needs triage filter
+and provenance notices; saved manual label editing remains separate work.
+See [classification rollout](classification.md) for classification provenance.
 
 The resolution agent uses a bounded flow: gather context, draft, validate,
 regenerate with feedback, then return a draft or escalate after the retry limit.
@@ -102,10 +101,13 @@ The agent constructor has a pass-through validator default; production workers
 explicitly inject the real engine. A completed check is a limited signal for
 human review, not a compliance certification.
 
-Approval currently chooses a draft by complaint rather than requiring the exact
-visible draft ID and version. Editing the displayed text does not save a revision.
-The resulting `resolved` status means approval, not delivery or a verified customer
-outcome. See [product scope](product_scope.md) for the intended outcome boundary.
+Approval requires the exact saved draft ID and displayed case version. A short
+case lock serializes decisions, while an immutable review event binds the reviewer
+to the text hash. Rejected drafts cannot later be approved. The displayed draft is
+read-only; saved human edits remain a separate workflow. New approvals use
+`response_approved`, with delivery and customer outcome unrecorded. Legacy
+`resolved` rows retain explicit unknown-outcome markers. See
+[product scope](product_scope.md) for the outcome boundary.
 
 ## Authentication and API conventions
 

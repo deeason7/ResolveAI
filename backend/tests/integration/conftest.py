@@ -36,6 +36,12 @@ class PostgresDatabase:
             await connection.execute(text("CREATE SCHEMA public"))
 
     async def upgrade(self, revision: str = "head") -> None:
+        await self._migrate("upgrade", revision)
+
+    async def downgrade(self, revision: str) -> None:
+        await self._migrate("downgrade", revision)
+
+    async def _migrate(self, direction: str, revision: str) -> None:
         # Alembic's env.py runs its own event loop. A subprocess also isolates
         # DATABASE_URL from the unit suite and cwd from any developer .env file.
         env = {
@@ -56,7 +62,7 @@ class PostgresDatabase:
             "alembic",
             "-c",
             str(BACKEND / "alembic.ini"),
-            "upgrade",
+            direction,
             revision,
             cwd=self.workdir,
             env=env,
@@ -74,7 +80,7 @@ class PostgresDatabase:
             details = details.replace(env["DATABASE_URL"], "[test database]")
             if self.url.password:
                 details = details.replace(self.url.password, "[redacted]")
-            pytest.fail(f"Alembic upgrade failed:\n{details}")
+            pytest.fail(f"Alembic {direction} failed:\n{details}")
 
 
 @pytest.fixture(scope="session")

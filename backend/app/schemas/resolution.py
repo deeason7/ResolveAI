@@ -27,6 +27,10 @@ class ResolutionRead(BaseModel):
     id: uuid.UUID
     complaint_id: uuid.UUID
     version: int
+    case_version: int
+    input_revision: int
+    legacy_provenance: bool
+    review_action: Literal["approved", "rejected"] | None = None
     draft_text: str
     guardrail_status: GuardrailStatus
     guardrail_notes: str | None = None
@@ -43,7 +47,13 @@ class ResolutionQueued(BaseModel):
     status: Literal["queued"] = "queued"
 
 
-class RejectRequest(BaseModel):
+class ReviewRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+    resolution_id: uuid.UUID
+    expected_case_version: int = Field(ge=1, strict=True)
+
+
+class RejectRequest(ReviewRequest):
     """Human reviewer's rejection — feedback is fed to the regeneration prompt."""
 
     feedback: str = Field(
@@ -61,3 +71,4 @@ class ReviewOutcome(BaseModel):
     version: int
     action: Literal["approved"]
     complaint_status: str
+    case_version: int

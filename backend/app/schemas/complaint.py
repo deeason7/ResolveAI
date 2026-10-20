@@ -30,6 +30,9 @@ class ComplaintCreate(BaseModel):
 
 
 class ClassificationMetadata(BaseModel):
+    case_version: int
+    input_revision: int
+    legacy_approval_outcome_unknown: bool
     classification_outcome: ClassificationState
     classification_source: str | None
     classification_stale: bool

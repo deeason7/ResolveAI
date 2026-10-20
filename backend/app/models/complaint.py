@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import false
+from sqlalchemy import CheckConstraint, false
 from sqlmodel import Field, SQLModel
 
 from app.models.types import EnumString
@@ -17,7 +17,7 @@ class ComplaintStatus(str, Enum):
     pending -> classified                       (low priority: stops here)
             -> escalated -> agent_triggered -> draft_ready  (guardrails passed)
                                             -> needs_review (agent failed/down)
-    draft_ready -> resolved (human approves) or agent_triggered (human rejects)
+    draft_ready -> response_approved (human approves) or agent_triggered (rejects)
     """
 
     pending = "pending"
@@ -26,7 +26,8 @@ class ComplaintStatus(str, Enum):
     agent_triggered = "agent_triggered"  # resolution agent is working on it
     draft_ready = "draft_ready"  # guardrail-passed draft awaiting human review
     needs_review = "needs_review"  # agent failed or unavailable; human takes over
-    resolved = "resolved"  # human approved a resolution; case closed
+    response_approved = "response_approved"  # approved text; delivery/outcome unrecorded
+    resolved = "resolved"  # legacy approval; delivery and outcome unknown
 
 
 class ClassificationState(str, Enum):
@@ -41,8 +42,17 @@ class ClassificationState(str, Enum):
 
 class Complaint(SQLModel, table=True):
     __tablename__ = "complaints"
+    __table_args__ = (
+        CheckConstraint("case_version >= 1", name="ck_complaint_case_version"),
+        CheckConstraint("input_revision >= 1", name="ck_complaint_input_revision"),
+    )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
+    case_version: int = Field(default=1, sa_column_kwargs={"server_default": "1"})
+    input_revision: int = Field(default=1, sa_column_kwargs={"server_default": "1"})
+    legacy_approval_outcome_unknown: bool = Field(
+        default=False, sa_column_kwargs={"server_default": false()}
+    )
 
     # Source data from CFPB
     cfpb_complaint_id: str | None = Field(

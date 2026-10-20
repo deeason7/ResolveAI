@@ -180,7 +180,7 @@ def current_user() -> dict | None:
 def clear_session() -> None:
     # "tour_step" belongs to tour.py — popped here so a demo logout fully
     # resets the guided tour (importing tour would be circular).
-    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step"):
+    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step", "review_draft_snapshot"):
         st.session_state.pop(key, None)
     client = st.session_state.pop(_CLIENT_KEY, None)
     if client is not None:
@@ -381,13 +381,27 @@ def list_revisions(complaint_id: str) -> list[dict]:
     return _request("GET", f"/resolutions/{complaint_id}/revisions").json()
 
 
-def approve_resolution(complaint_id: str) -> dict:
-    return _request("POST", f"/resolutions/{complaint_id}/approve").json()
-
-
-def reject_resolution(complaint_id: str, feedback: str) -> dict:
+def approve_resolution(
+    complaint_id: str, *, resolution_id: str, expected_case_version: int
+) -> dict:
     return _request(
-        "POST", f"/resolutions/{complaint_id}/reject", json={"feedback": feedback}
+        "POST",
+        f"/resolutions/{complaint_id}/approve",
+        json={"resolution_id": resolution_id, "expected_case_version": expected_case_version},
+    ).json()
+
+
+def reject_resolution(
+    complaint_id: str, feedback: str, *, resolution_id: str, expected_case_version: int
+) -> dict:
+    return _request(
+        "POST",
+        f"/resolutions/{complaint_id}/reject",
+        json={
+            "feedback": feedback,
+            "resolution_id": resolution_id,
+            "expected_case_version": expected_case_version,
+        },
     ).json()
 
 

@@ -293,8 +293,14 @@ async def submit_complaint(
     session.add(complaint)
     await session.flush()
     await session.refresh(complaint)
+    await session.commit()
     try:
-        await enqueue_complaint(redis, complaint.id)
+        await enqueue_complaint(
+            redis,
+            complaint.id,
+            expected_case_version=complaint.case_version,
+            input_revision=complaint.input_revision,
+        )
     except Exception:
         logger.exception("classification enqueue failed; %s stays pending", complaint.id)
     logger.info("Complaint submitted: %s", complaint.id)

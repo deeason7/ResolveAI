@@ -4,7 +4,7 @@ import uuid
 from datetime import datetime
 from enum import Enum
 
-from sqlalchemy import JSON, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, UniqueConstraint, false
 from sqlalchemy.dialects.postgresql import JSONB
 from sqlmodel import Field, SQLModel
 
@@ -20,18 +20,19 @@ class GuardrailStatus(str, Enum):
 
 class Resolution(SQLModel, table=True):
     __tablename__ = "resolutions"
-    # One row per (complaint, version). Versions are assigned max(version)+1 per
-    # complaint, which is a read-modify-write: two concurrent generations could
-    # both compute the same next version and double-write. This constraint makes
-    # the database reject the loser instead of silently storing a duplicate.
+    # Writers allocate versions while holding the parent case lock; uniqueness
+    # remains a database backstop for callers that violate that protocol.
     __table_args__ = (
         UniqueConstraint("complaint_id", "version", name="uq_resolution_complaint_version"),
+        CheckConstraint("input_revision >= 1", name="ck_resolution_input_revision"),
     )
 
     id: uuid.UUID = Field(default_factory=uuid.uuid4, primary_key=True)
     complaint_id: uuid.UUID = Field(foreign_key="complaints.id", index=True)
 
     version: int = Field(default=1)  # increments on re-generation
+    input_revision: int = Field(default=1, sa_column_kwargs={"server_default": "1"})
+    legacy_provenance: bool = Field(default=False, sa_column_kwargs={"server_default": false()})
     draft_text: str
     # EnumString: same enum-as-VARCHAR mapping as Complaint.status / User.role —
     # stores the value, round-trips back as the enum (no isinstance() guards).

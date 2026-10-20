@@ -82,7 +82,7 @@ STEPS = [
         "file": "pages/workspace.py",
         "title": "The engine room",
         "body": "Inspect recorded case states and available worker information. "
-        "The current resolved label records approval, not a verified customer outcome.",
+        "Response approval records saved text approval; delivery and outcome remain unrecorded.",
         "try": "Compare the **Pipeline** counts with the queue; staff controls require "
         "write access.",
     },

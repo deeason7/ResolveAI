@@ -133,7 +133,9 @@ class TestProcessMessage:
     async def test_classifies_and_persists(self, redis_client, factory, vector_store):
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome(urgency=3))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -157,7 +159,9 @@ class TestProcessMessage:
         cid = await _seed(factory)
         graph_store = AsyncMock()
         w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False), graph_store)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.needs_review
@@ -192,7 +196,9 @@ class TestProcessMessage:
             classification_was_fallback=True,
         )
         w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.classified
@@ -224,7 +230,9 @@ class TestProcessMessage:
             else ClassificationState.succeeded,
         )
         w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         assert w.classifier.calls == []
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -249,7 +257,9 @@ class TestProcessMessage:
             return _outcome(succeeded=False)
 
         monkeypatch.setattr(cw.asyncio, "to_thread", change_case_then_return)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.resolved
@@ -260,7 +270,9 @@ class TestProcessMessage:
     async def test_high_priority_escalates(self, redis_client, factory, vector_store):
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome(urgency=5))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.escalated
@@ -270,7 +282,9 @@ class TestProcessMessage:
     ):
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome(is_fallback=True))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.classification_outcome == ClassificationState.succeeded
@@ -281,11 +295,15 @@ class TestProcessMessage:
     async def test_missing_complaint_is_poison(self, redis_client, factory, vector_store):
         w = _worker(redis_client, factory, vector_store, _outcome())
         # Returns normally so the caller acks; nothing to update.
-        await w.process_message({"complaint_id": str(uuid.uuid4())})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(uuid.uuid4())}
+        )
 
     async def test_bad_uuid_is_poison(self, redis_client, factory, vector_store):
         w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message({"complaint_id": "not-a-uuid"})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": "not-a-uuid"}
+        )
 
     async def test_vector_failure_still_commits(
         self, redis_client, factory, vector_store, monkeypatch
@@ -297,7 +315,9 @@ class TestProcessMessage:
 
         monkeypatch.setattr(cw, "embed_text", _boom)
         w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message({"complaint_id": str(cid)})  # must not raise
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )  # must not raise
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -309,7 +329,9 @@ class TestProcessMessage:
         cid = await _seed(factory, company="Wells Fargo", product="Mortgage", issue="Servicing")
         graph_store = AsyncMock()
         w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         graph_store.upsert_complaint_entities.assert_awaited_once_with(
             complaint_id=str(cid),
@@ -323,7 +345,9 @@ class TestProcessMessage:
         graph_store = AsyncMock()
         graph_store.upsert_complaint_entities.side_effect = RuntimeError("neo4j down")
         w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
-        await w.process_message({"complaint_id": str(cid)})  # must not raise
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )  # must not raise
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -333,7 +357,9 @@ class TestProcessMessage:
         # The default wiring (graph_store=None) must not blow up — the write is skipped.
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.classified
@@ -349,7 +375,9 @@ class TestStreamIntegration:
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome())
         await w.ensure_group()
-        await enqueue_complaint(redis_client, cid, stream=w.stream)
+        await enqueue_complaint(
+            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
+        )
 
         resp = await redis_client.xreadgroup(
             groupname=w.group,
@@ -374,7 +402,9 @@ class TestStreamIntegration:
         cid = await _seed(factory)
         w = _worker(redis_client, factory, vector_store, _outcome(urgency=3))
         await w.ensure_group()
-        await enqueue_complaint(redis_client, cid, stream=w.stream)
+        await enqueue_complaint(
+            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
+        )
         await redis_client.xreadgroup(
             groupname=w.group, consumername="dead-worker", streams={w.stream: ">"}, count=10
         )
@@ -425,3 +455,24 @@ class TestPollCadence:
 
         assert sweeps.await_count == 2  # only cycles 0 and 3
         assert redis_client.xreadgroup.await_args.kwargs["block"] == 250
+
+
+async def test_unversioned_classification_trigger_fails_closed(factory, redis_client, vector_store):
+    cid = await _seed(factory)
+    worker = _worker(redis_client, factory, vector_store, _outcome())
+    await worker.process_message({"complaint_id": str(cid)})
+    assert worker.classifier.calls == []
+
+
+async def test_replay_after_classification_does_not_change_input_revision(
+    factory, redis_client, vector_store
+):
+    cid = await _seed(factory)
+    worker = _worker(redis_client, factory, vector_store, _outcome())
+    message = {"complaint_id": str(cid), "expected_case_version": "1", "input_revision": "1"}
+    await worker.process_message(message)
+    await worker.process_message(message)
+    assert len(worker.classifier.calls) == 1
+    async with factory() as session:
+        case = await session.get(Complaint, cid)
+        assert case.case_version == case.input_revision == 2

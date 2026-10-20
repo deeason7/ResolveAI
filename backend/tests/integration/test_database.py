@@ -37,6 +37,7 @@ async def test_empty_database_migrates_to_head(pg_engine):
         "complaints",
         "llm_logs",
         "resolutions",
+        "review_events",
         "users",
     }
     assert revision == script.get_current_head()
@@ -164,6 +165,10 @@ async def test_previous_revision_upgrades_without_losing_linked_rows(postgres_da
         assert (await session.get(ComplaintLabel, label_id)).complaint_id == complaint_id
         assert (await session.get(AuditLog, audit_id)).user_id == user_id
         legacy = await session.get(Complaint, complaint_id)
+        assert legacy.legacy_approval_outcome_unknown is True
+        assert legacy.case_version == legacy.input_revision == 1
+        assert restored.legacy_provenance is True
+        assert restored.input_revision == 1
         assert legacy.classification_outcome == "legacy_unknown"
         assert legacy.classification_source is None
         assert legacy.classified_at is None

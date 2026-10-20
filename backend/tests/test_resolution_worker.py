@@ -181,7 +181,9 @@ class TestProcessMessage:
         )
         agent_factory = _stub_factory(_result())
         w = _worker(redis_client, factory, None, agent_factory=agent_factory)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         assert agent_factory.calls == []
         async with factory() as s:
             assert (await s.exec(select(Resolution))).all() == []
@@ -191,7 +193,9 @@ class TestProcessMessage:
         cid = await _seed(factory)
         af = _stub_factory(_result())
         w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -203,13 +207,15 @@ class TestProcessMessage:
         assert rows[0].guardrail_violations is None
         assert rows[0].draft_text.startswith("Thank you")
         assert "drafted via groq" in rows[0].reasoning_summary
-        # The agent was built only after the in-flight status was committed.
-        assert af.calls[0]["status_at_build"] == ComplaintStatus.agent_triggered
+        # A retriable stream message does not advance the case at worker claim.
+        assert af.calls[0]["status_at_build"] == ComplaintStatus.escalated
 
     async def test_llm_calls_and_judge_calls_logged_in_one_txn(self, redis_client, factory):
         cid = await _seed(factory)
         w = _worker(redis_client, factory, _result(drafts=2, judges=1))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         async with factory() as s:
             logs = (await s.exec(select(LLMLog))).all()
@@ -234,7 +240,9 @@ class TestProcessMessage:
             factory,
             _result(status=STATUS_FAILED, violations=violations, feedback="fix it"),
         )
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -252,7 +260,9 @@ class TestProcessMessage:
             factory,
             _result(status=STATUS_UNAVAILABLE, with_draft=False, drafts=0, judges=0),
         )
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         async with factory() as s:
             c = await s.get(Complaint, cid)
@@ -264,7 +274,9 @@ class TestProcessMessage:
         # escalated (no guardrail verdict), and route the complaint to a human.
         cid = await _seed(factory)
         w = _worker(redis_client, factory, _result(status=STATUS_UNAVAILABLE, judges=0))
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         rows = await _get_resolutions(factory, cid)
         assert rows[0].guardrail_status == GuardrailStatus.escalated
@@ -275,11 +287,37 @@ class TestProcessMessage:
     async def test_feedback_message_builds_next_version_with_context(self, redis_client, factory):
         cid = await _seed(factory)
         w1 = _worker(redis_client, factory, _result())
-        await w1.process_message({"complaint_id": str(cid)})  # version 1, draft_ready
+        await w1.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )  # version 1, draft_ready
+
+        from app.models.user import User
+        from app.services.case_transitions import review_revision
+
+        async with factory() as session:
+            user = User(
+                email="worker-review@example.test", full_name="Reviewer", hashed_password="unused"
+            )
+            session.add(user)
+            await session.flush()
+            first = (
+                await session.exec(select(Resolution).where(Resolution.complaint_id == cid))
+            ).one()
+            await review_revision(
+                session, cid, first.id, 2, user.id, action="rejected", feedback="more empathy"
+            )
+            await session.commit()
 
         af = _stub_factory(_result())
         w2 = _worker(redis_client, factory, None, agent_factory=af)
-        await w2.process_message({"complaint_id": str(cid), "feedback": "Cite the FCRA timeline"})
+        await w2.process_message(
+            {
+                "expected_case_version": "3",
+                "input_revision": "1",
+                "complaint_id": str(cid),
+                "feedback": "Cite the FCRA timeline",
+            }
+        )
 
         rows = await _get_resolutions(factory, cid)
         assert [r.version for r in rows] == [1, 2]
@@ -291,7 +329,9 @@ class TestProcessMessage:
         cid = await _seed(factory, status=ComplaintStatus.draft_ready)
         af = _stub_factory(_result())
         w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
 
         assert af.calls == []  # agent never built
         assert await _get_resolutions(factory, cid) == []
@@ -303,7 +343,9 @@ class TestProcessMessage:
         cid = await _seed(factory, status=ComplaintStatus.resolved)
         af = _stub_factory(_result())
         w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         assert af.calls == []
 
     async def test_unclassified_complaint_is_poison(self, redis_client, factory):
@@ -311,23 +353,31 @@ class TestProcessMessage:
         af = _stub_factory(_result())
         w = _worker(redis_client, factory, None, agent_factory=af)
         # Returns normally (-> ack); the agent has nothing to work from.
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         assert af.calls == []
         assert await _get_resolutions(factory, cid) == []
 
     async def test_out_of_vocabulary_classification_is_poison(self, redis_client, factory):
         cid = await _seed(factory, sentiment="furious")  # not in the closed vocab
         w = _worker(redis_client, factory, _result())
-        await w.process_message({"complaint_id": str(cid)})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+        )
         assert await _get_resolutions(factory, cid) == []
 
     async def test_bad_uuid_is_poison(self, redis_client, factory):
         w = _worker(redis_client, factory, _result())
-        await w.process_message({"complaint_id": "not-a-uuid"})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": "not-a-uuid"}
+        )
 
     async def test_missing_complaint_is_poison(self, redis_client, factory):
         w = _worker(redis_client, factory, _result())
-        await w.process_message({"complaint_id": str(uuid.uuid4())})
+        await w.process_message(
+            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(uuid.uuid4())}
+        )
 
 
 class TestStreamIntegration:
@@ -340,7 +390,9 @@ class TestStreamIntegration:
         cid = await _seed(factory)
         w = _worker(redis_client, factory, _result())
         await w.ensure_group()
-        await enqueue_resolution(redis_client, cid, stream=w.stream)
+        await enqueue_resolution(
+            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
+        )
 
         resp = await redis_client.xreadgroup(
             groupname=w.group,
@@ -357,7 +409,14 @@ class TestStreamIntegration:
         assert summary["pending"] == 0
 
     async def test_enqueue_carries_feedback_field(self, redis_client):
-        await enqueue_resolution(redis_client, uuid.uuid4(), feedback="too curt", stream="s")
+        await enqueue_resolution(
+            redis_client,
+            uuid.uuid4(),
+            feedback="too curt",
+            expected_case_version=1,
+            input_revision=1,
+            stream="s",
+        )
         entries = await redis_client.xrange("s")
         assert entries[0][1]["feedback"] == "too curt"
 
@@ -369,7 +428,9 @@ class TestStreamIntegration:
 
         w = _worker(redis_client, factory, None, agent_factory=_boom_factory)
         await w.ensure_group()
-        await enqueue_resolution(redis_client, cid, stream=w.stream)
+        await enqueue_resolution(
+            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
+        )
 
         resp = await redis_client.xreadgroup(
             groupname=w.group,
@@ -415,3 +476,41 @@ class TestPollCadence:
 
         assert sweeps.await_count == 2  # only cycles 0 and 2
         assert redis_client.xreadgroup.await_args.kwargs["block"] == 30000
+
+
+@pytest.mark.parametrize(
+    "status",
+    [ComplaintStatus.response_approved, ComplaintStatus.resolved, ComplaintStatus.draft_ready],
+)
+async def test_feedback_never_bypasses_review_lifecycle(factory, redis_client, status):
+    cid = await _seed(factory, status=status)
+    agent = _stub_factory(_result())
+    worker = _worker(redis_client, factory, None, agent_factory=agent)
+    await worker.process_message(
+        {
+            "complaint_id": str(cid),
+            "expected_case_version": "1",
+            "input_revision": "1",
+            "feedback": "Old feedback",
+        }
+    )
+    assert agent.calls == []
+    assert await _get_resolutions(factory, cid) == []
+
+
+@pytest.mark.parametrize(
+    "versions",
+    [
+        {},
+        {"expected_case_version": "no", "input_revision": "1"},
+        {"expected_case_version": "0", "input_revision": "1"},
+        {"expected_case_version": "2", "input_revision": "1"},
+        {"expected_case_version": "1", "input_revision": "2"},
+    ],
+)
+async def test_unversioned_or_stale_trigger_cannot_run_inference(factory, redis_client, versions):
+    cid = await _seed(factory)
+    agent = _stub_factory(_result())
+    worker = _worker(redis_client, factory, None, agent_factory=agent)
+    await worker.process_message({"complaint_id": str(cid), **versions})
+    assert agent.calls == []

@@ -35,7 +35,8 @@ class WorkspaceBoard(BaseModel):
     agent_triggered: int  # resolution agent working on it
     draft_ready: int  # guardrail-passed draft awaiting human review
     needs_review: int  # agent failed / unavailable — human takes over
-    resolved: int  # human approved — closed
+    response_approved: int  # approved response text; delivery/outcome unrecorded
+    resolved: int  # legacy approval; delivery/outcome unknown
     total: int
     classification_unavailable: int  # subset of open cases needing manual triage
     classification_stream: StreamInfo
