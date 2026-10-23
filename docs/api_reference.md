@@ -1,7 +1,7 @@
 # API reference
 
 Summary of every endpoint. Interactive schemas live at
-`http://localhost:8010/docs` (OpenAPI) — this page is the map, that page is
+`http://localhost:8010/api/docs` (OpenAPI) — this page is the map, that page is
 the territory. All routes are prefixed `/api/v1`.
 
 **Auth model:** register/login return a short-lived bearer access token and
@@ -28,24 +28,24 @@ bulk import additionally requires the `admin` role.
 | GET | `/queue` | Priority-sorted triage page | Actionable statuses by default; filters incl. `urgency_min/max` (422 if min>max); 200-char previews |
 | GET | `/{id}` | Full complaint | 404 unknown id |
 | GET | `/{id}/similar` | Top-K nearest narratives | Vector search; self excluded; optional `product` filter; `limit` 1–10; **503 if the similarity subsystem is down** (page degrades, complaint still loads) |
-| POST | `/` | 201 + complaint | Queues classification (best-effort enqueue; `pending` status is the durable signal) |
+| POST | `/` | 201 + complaint | Commits complaint + classification job atomically; optional `Idempotency-Key` |
 | POST | `/bulk-import` | Import counts | **Admin.** Server-local CSV path, sandboxed to mounted data dirs; idempotent |
 
 ## Resolutions — `/resolutions`
 
 | Method | Path | Returns | Notes |
 |---|---|---|---|
-| POST | `/{complaint_id}/generate` | **202** queued | 409 if already running / response approved / no current classification |
+| POST | `/{complaint_id}/generate` | **202** job identity/status | Optional `Idempotency-Key`; 409 if already queued/running, response approved or no current classification |
 | GET | `/{complaint_id}` | Latest draft | Draft text, per-layer guardrail violations, reasoning steps, version |
 | GET | `/{complaint_id}/revisions` | All versions | |
 | POST | `/{complaint_id}/approve` | 200 outcome | Body: `resolution_id`, `expected_case_version`; saved draft must pass guardrails |
-| POST | `/{complaint_id}/reject` | **202** queued | Body: `resolution_id`, `expected_case_version`, `feedback` (10–2000 chars) |
+| POST | `/{complaint_id}/reject` | **202** job identity/status | Body: `resolution_id`, `expected_case_version`, `feedback` (10–2000 chars) |
 
 The latest-draft and revision responses include `case_version`, `input_revision`,
 `legacy_provenance` and `review_action`. Send the exact displayed draft's `id`
 and `case_version` as `resolution_id` and `expected_case_version`. A stale case,
-older draft, cross-case ID or previously reviewed revision returns an actionable
-409. Missing identity returns 422; there is no implicit latest-draft approval.
+older draft or cross-case ID returns an actionable 409. Repeating an exact
+rejection returns its original job; a different decision on reviewed text conflicts. Missing identity returns 422; there is no implicit latest-draft approval.
 Reload and read the saved response before submitting another decision.
 
 Approval changes the case to `response_approved`: the exact saved response was
@@ -54,11 +54,40 @@ rows retain that status with `legacy_approval_outcome_unknown=true`. They do not
 establish delivery or resolution. Every new decision records an immutable review
 event with the reviewer, draft ID, versions, decision and text hash.
 
-Generation and rejection commit their case changes before contacting Redis. If
-dispatch fails or its outcome is uncertain, the attempt is invalidated and the
-API returns 503 with a reload/retry explanation. A saved rejection remains
-saved. Durable transactional dispatch is still pending; see
-[review concurrency and rollout](review_concurrency.md).
+Generation and rejection commit the case transition, review evidence (for
+rejection), and job together. Capacity rejection returns 503 without accepting
+changes. Intake and generation accept an `Idempotency-Key` of 1–128 characters,
+scoped to the actor and route. Repeating the same content returns its original
+case/job; changing content under that key returns 409. Rejection additionally
+uses the exact reviewer/draft/case-version identity when no key is supplied.
+A replay returns the original job's current status without repeating the review.
+See [durable jobs](jobs.md) and [review concurrency](review_concurrency.md).
+
+## Workspace — `/workspace`
+
+| Method | Path | Returns | Notes |
+|---|---|---|---|
+| GET | `/board` | Case counts and job health | Authenticated; per-kind queued/running/failed counts and oldest pending age |
+| POST | `/enqueue/classification` | Enqueued count and kind | **Staff.** `limit` 1–500; skips existing intents |
+| POST | `/enqueue/resolution` | Enqueued count and kind | **Staff.** `limit` 1–500; current classified escalations only |
+
+Batches commit all selected transitions and jobs together. Capacity rejection
+returns 503 without partial acceptance. A new batch request can select another
+batch of eligible cases.
+
+## Jobs — `/jobs`
+
+All job inspection and retry endpoints require an analyst or admin role.
+Responses omit payloads, request keys and lease credentials.
+
+| Method | Path | Returns | Notes |
+|---|---|---|---|
+| GET | `/` | Paginated jobs | `status` defaults to `failed`; optional `kind`; `limit` 1–100 and `offset` |
+| GET | `/{job_id}` | Job state and safe failure category | Includes attempts, retry generation and progress timestamps; 404 unknown job |
+| POST | `/{job_id}/retry` | Current job | Body: displayed `expected_attempts`, `expected_retry_generation`; stale/ineligible retry returns 409 |
+
+Retry grants the same failed intent another bounded attempt budget. Repeating
+that exact retry request returns the accepted generation without multiplying work.
 
 ## Analytics — `/analytics`
 

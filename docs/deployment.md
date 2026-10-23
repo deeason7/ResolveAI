@@ -1,5 +1,9 @@
 # Deployment
 
+Existing deployments must complete the [durable-job cutover](jobs.md#running-and-migration-boundary)
+before starting the new API and workers. Adding the jobs table does not migrate
+old stream work or reconcile stranded cases.
+
 This is the runbook for putting ResolveAI on a public URL. It uses a separate
 production Compose file (`docker-compose.prod.yml`) that differs from the dev
 stack. This describes configuration, not a production-readiness certification.
@@ -19,7 +23,7 @@ internet ──────────────────▶  Caddy  ─�
                     ┌────────────┬───────────────┼───────────────┐
                     ▼            ▼               ▼               ▼
                  postgres      redis          qdrant           neo4j
-                 (+ classification-worker, resolution-worker)
+                 (+ classification-worker, resolution-worker, index-worker)
 ```
 
 - **Only Caddy is published** (80/443). The API and every datastore stay on the
@@ -35,9 +39,9 @@ internet ──────────────────▶  Caddy  ─�
   is interpolated; a missing DOMAIN fails configuration.
 - **Caddy provisions and renews TLS automatically** from Let's Encrypt for your
   domain. No certbot, no cron.
-- **The stream workers run as services** (`classification-worker`,
-  `resolution-worker`) with `restart: unless-stopped`, instead of being started
-  by hand like in dev.
+- **The PostgreSQL job workers run as services** (`classification-worker`,
+  `resolution-worker`, `index-worker`) with `restart: unless-stopped`.
+  Development Compose also includes the three worker services.
 - **Ollama is opt-in.** The production example uses cloud classification
   (`LLM_SKIP_LOCAL=true`). Provider pricing, quotas and data handling need review. A bigger box can
   run the local 3B with `--profile local-llm` (and `LLM_SKIP_LOCAL=false`).
@@ -115,7 +119,7 @@ The private alias does not add a public API route. See the official
 [Caddy site-address rules](https://caddyserver.com/docs/caddyfile/concepts) and
 [Compose aliases](https://docs.docker.com/reference/compose-file/services/#aliases).
 
-`--build` builds the `api` and `frontend` images first; the two worker services
+`--build` builds the `api` and `frontend` images first; the three worker services
 reuse the freshly tagged `resolveai/api:latest`, so they need the build to
 happen before they start.
 

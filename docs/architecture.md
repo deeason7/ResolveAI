@@ -2,15 +2,16 @@
 
 This describes the implementation and its known limits. The initial review was
 2026-10-17; access control, classification outcomes, sessions, PostgreSQL verification
-and backup handling were revised on 2026-10-18. Proposed queue/review changes are not existing guarantees.
+and backup handling were revised on 2026-10-18. Exact review and durable jobs were
+added subsequently; deployment and legacy-work reconciliation remain separate steps.
 
 ## Runtime topology
 
 | Component | Current role |
 |---|---|
 | FastAPI | API, authentication, validation and rate limits |
-| PostgreSQL | Complaints, users, draft resolutions, labels, telemetry and audit records |
-| Redis | Stream queues and refresh-token revocation |
+| PostgreSQL | Business records, immutable review events and durable processing jobs |
+| Redis | Refresh-token revocation and request limits; legacy streams await cutover |
 | Qdrant | 384-dimensional narrative embeddings for similarity search |
 | Neo4j with APOC | Company/product/issue relationships and seeded reference material |
 | Ollama | Optional local inference when a compatible model is installed |
@@ -18,46 +19,54 @@ and backup handling were revised on 2026-10-18. Proposed queue/review changes ar
 
 Development Compose includes these services. Production Compose starts the workers
 as services and makes Ollama opt-in. The managed hosting configuration runs the API
-and both workers in one container under supervisord, with external datastores.
+and three workers in one container under supervisord, with external datastores.
 Both production environment examples set `LLM_SKIP_LOCAL=true`: their default
 classification path is cloud inference, not the fine-tuned local model.
 
 ## State and queue boundary
 
-PostgreSQL is authoritative business storage. Qdrant and Neo4j are derived indexes;
-rebuild scripts exist, but rebuild completeness and duration need verification.
-Redis Streams use consumer groups and pending-message reclamation. These mechanisms
-allow redelivery; they do not make database updates and queue publication atomic.
+PostgreSQL stores business state and processing intent in the same transaction.
+Workers poll its jobs table directly. Redis remains part of authentication and
+rate limiting, but no longer decides whether classification or drafting work exists.
+Qdrant and Neo4j remain derived indexes.
 
 ```mermaid
 sequenceDiagram
     participant U as Client
     participant API as FastAPI
     participant PG as PostgreSQL
-    participant R as Redis
     participant W as Classification worker
     participant L as Configured model provider
     U->>API: Submit complaint
-    API->>PG: Insert and commit pending complaint
-    API->>R: Publish versioned classification message
+    API->>PG: Commit pending complaint + classification job
     API-->>U: Complaint ID
-    R->>W: Read or reclaim message
-    W->>L: Classify without holding a row lock
-    W->>PG: Persist classification and telemetry
-    W->>R: Acknowledge message
+    W->>PG: Claim job with a renewable lease
+    W->>L: Classify outside a database transaction
+    W->>PG: Check lease and case/input versions
+    W->>PG: Commit labels + telemetry + downstream jobs + completion
 ```
 
-Publication follows the database commit, leaving a crash window between the two
-systems. A lost enqueue can still strand work without a durable job record;
-automatic reconciliation is not yet implemented. Versioned messages fence stale
-results, but do not guarantee durable delivery or exactly-once external calls.
+The claim uses a short `FOR UPDATE SKIP LOCKED` transaction. Expiry permits another
+worker to retry; the lease token prevents the previous owner from saving a late
+result. Heartbeats renew long calls. Result persistence takes the case lock before
+the job lock and validates both identities. A successful classification enqueues
+indexing, and high-priority cases also enqueue drafting, in that same transaction.
+A failed transaction preserves the original work for retry without partially
+saving labels or follow-up jobs.
 
-Synchronous model calls are offloaded with `asyncio.to_thread`. Both workers end
-their read transaction before inference and lock/recheck case and input versions
-at completion. Classification-triggered drafts remain `escalated` while running;
-explicit requests mark `agent_triggered` when scheduled. Worker claims do not
-advance versions, so a crashed attempt can retry its message. See
-[review concurrency](review_concurrency.md) for invariants and rollout limits.
+Accepted work is retained even beyond the admission ceiling. New intake/batches
+receive a visible capacity error before state changes; already accepted workflows
+can finish their bounded follow-ups. Exhausted jobs remain inspectable and staff
+can explicitly retry eligible intents. Model calls may repeat after a crash or
+expired lease; this is not exactly-once external execution. Failed/stale attempt
+cost accounting is not yet a complete provider-call ledger.
+
+Synchronous model calls are offloaded with `asyncio.to_thread`. Workers end their
+read transaction before external work. Classification-triggered drafts remain
+`escalated` while running; explicit requests mark `agent_triggered` when scheduled.
+Claims and failed attempts preserve input/job identity. See [durable jobs](jobs.md)
+for retry semantics and the required legacy-queue cutover, and
+[review concurrency](review_concurrency.md) for exact review invariants.
 
 ## Classification and drafting
 
@@ -75,8 +84,8 @@ Generation and regeneration reject unavailable/stale inputs. Successful fallback
 records the actual provider and fallback flag. Task latency includes all attempts.
 
 The classification worker skips terminal/manual-source cases. Both workers reject
-stale case/input versions before inference and when persisting results. Durable
-job identity and leases remain unfinished. The UI exposes a Needs triage filter
+stale case/input versions before inference and when persisting results. Job leases also fence
+expired worker results. The UI exposes a Needs triage filter
 and provenance notices; saved manual label editing remains separate work.
 See [classification rollout](classification.md) for classification provenance.
 

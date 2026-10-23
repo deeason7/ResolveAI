@@ -1,5 +1,9 @@
 # Managed demonstration deployment
 
+Existing deployments must complete the [durable-job cutover](jobs.md#running-and-migration-boundary)
+before starting the new API and workers. Adding the jobs table does not migrate
+old stream work or reconcile stranded cases.
+
 This is the existing alternative to the single-VM runbook
 ([deployment.md](deployment.md)). It splits the stack across managed services and
 uses a smaller corpus. Provider plans, card requirements, storage limits, idle
@@ -19,7 +23,8 @@ requests to the configured cloud provider.
  internet ───▶  frontend (Streamlit)  ── server-side ──▶  Hugging Face Space
                                                           ├─ api (FastAPI)
                                                           ├─ classification-worker
-                                                          └─ resolution-worker
+                                                          ├─ resolution-worker
+                                                          └─ index-worker
                                                               │  (one container,
                                                               │   supervisord)
                     ┌──────────────┬──────────────┬──────────┴─────┐
@@ -41,10 +46,10 @@ from the providers' published terms; the table describes component roles only.
 | Service | Holds |
 |---------|-------|
 | [Neon](https://neon.tech) | PostgreSQL business records |
-| [Upstash](https://upstash.com) | Redis streams and token revocation |
+| [Upstash](https://upstash.com) | Session state and request limits |
 | [Qdrant Cloud](https://cloud.qdrant.io) | Narrative embeddings |
 | [Neo4j Aura](https://neo4j.com/cloud/aura-free/) | Derived graph |
-| [Hugging Face](https://huggingface.co) | API and both workers |
+| [Hugging Face](https://huggingface.co) | API and three workers |
 | [Streamlit Community Cloud](https://streamlit.io/cloud) | Dashboard |
 | [Groq](https://console.groq.com) | Cloud classification and drafting |
 
@@ -73,7 +78,7 @@ Create each service, then collect its connection details into a local
 
 ## 2. Backend → Hugging Face Space
 
-The root `Dockerfile` builds one image that runs the API and both stream workers
+The root `Dockerfile` builds one image that runs the API and three PostgreSQL job workers
 together under `supervisord` (this topology uses a single container; each program
 restarts independently). To deploy:
 
@@ -179,7 +184,7 @@ and a staff account for the synthetic write checks. Registration does not grant
 staff access. Then:
 
 - The **Board** / **Triage** pages load complaints → Neon is connected.
-- **Workspace → enqueue a small classification batch** → Upstash + the Space's
+- **Workspace → enqueue a small classification batch** → PostgreSQL jobs + the Space's
   classification worker are wired; watch a complaint move to *classified* /
   *escalated*.
 - A complaint's **Similar** list returns matches → Qdrant Cloud is populated.

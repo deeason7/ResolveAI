@@ -20,25 +20,27 @@ generation and reviewer approval/rejection. Rejection feedback feeds regeneratio
 The dashboard includes triage, case details, aggregates, a graph explorer, logged
 model usage and a workspace for staff-triggered batches.
 
-Approval currently sets a case to `resolved`; this records an application decision,
-not delivery, remediation or customer satisfaction. Editing the visible draft does
-not save a new revision, and approval is not yet bound to the exact visible draft
-version. Real customer use requires those review-integrity fixes and verified
-recovery. No reviewer-time savings, resolution-rate improvement, production
-reliability or legal-correctness result has been established.
+Approval binds the exact saved draft and displayed case version. New approvals
+use `response_approved`; delivery, remediation and customer satisfaction remain
+unrecorded. Legacy `resolved` rows retain an unknown-outcome marker. The displayed
+draft is read-only; saved human editing remains separate work. No reviewer-time
+savings, production reliability or legal-correctness result has been established.
 
 ## Current pipeline
 
 ```mermaid
 flowchart LR
     A[Complaint API] --> PG[(PostgreSQL)]
-    A --> Q[Redis Stream]
+    PG --> Q[Durable jobs]
     Q --> W[Classification worker]
     W --> L[Configured local or cloud model]
     W --> PG
-    W --> V[(Qdrant)]
-    W --> G[(Neo4j)]
-    R[Drafting worker] --> V
+    W --> Q
+    Q --> I[Index worker]
+    I --> V[(Qdrant)]
+    I --> G[(Neo4j)]
+    Q --> R[Drafting worker]
+    R --> V
     R --> G
     R --> L
     R --> C[Pattern checks and tone judge]
@@ -46,10 +48,10 @@ flowchart LR
     UI --> PG
 ```
 
-PostgreSQL stores business records. Qdrant and Neo4j contain derived search/context
-information. Redis publication and database commits are currently separate, so
-this diagram is not a guarantee of atomic enqueueing or lossless processing.
-Worker replay and stale-result handling need further protection.
+PostgreSQL commits business records and durable job intent together. Workers use
+renewable leases and version checks to fence late results. Qdrant and Neo4j contain
+derived search/context information. External calls can repeat after a crash;
+existing deployments still require a [legacy queue cutover](docs/jobs.md).
 
 Local inference requires an installed compatible model. Both production environment
 examples set `LLM_SKIP_LOCAL=true`, using cloud inference by default. Total
@@ -57,7 +59,7 @@ provider failure now records classification as unavailable, with unknown urgency
 for new cases and visible manual-triage work. Prior labels survive failed
 reclassification but are marked stale; automatic drafting is blocked. Legacy
 provenance stays unknown. [Architecture and limits](docs/architecture.md) explain
-these boundaries and the remaining manual-editing and job-reliability work.
+these boundaries and the remaining manual-editing and deployment work.
 
 ## Dashboard
 
@@ -69,7 +71,7 @@ these boundaries and the remaining manual-editing and job-reliability work.
 | Analytics | Trends and company aggregates with graph-derived scores |
 | Graph Explorer | Company/product/issue/reference relationships |
 | LLMOps Observatory | Logged usage, estimated cost, latency and violations; incomplete attempt coverage |
-| Workspace | Case-state counts and staff batch controls |
+| Workspace | Case counts, durable job backlog/failures and staff batch/retry controls |
 
 ## Model experiment and checks
 
@@ -93,7 +95,7 @@ a green check is not a compliance certification.
 |---|---|---|
 | FastAPI | API, authentication, authorization and rate limits | 8010 |
 | PostgreSQL 16 | Business records | 5433 |
-| Redis 7 | Streams and token revocation | 6380 |
+| Redis 7 | Session state and request limits | 6380 |
 | Qdrant | 384-dimensional narrative similarity search | 6334 |
 | Neo4j 5 + APOC | Seeded relationship/reference graph | 7475 / 7688 |
 | Ollama | Optional local model serving | 11435 |
@@ -127,11 +129,10 @@ has processed that many records. Confirm import/rebuild completion before retryi
 an interrupted run; the current ingestion path has known batch/restart limits.
 
 Model work requires either a compatible Ollama model or a configured cloud key.
-Start the development workers when needed:
+Development Compose includes all three workers. Start or restart their services with:
 
 ```bash
-docker compose exec -d api python -m app.workers.classification_worker
-docker compose exec -d api python -m app.workers.resolution_worker
+docker compose up -d classification-worker resolution-worker index-worker
 ```
 
 ## Development and deployment
@@ -160,7 +161,7 @@ for historical releases.
 
 ## Repository layout
 
-- `backend/app/`: API routes, schemas, models, services and stream workers.
+- `backend/app/`: API routes, schemas, models, services and durable job workers.
 - `backend/alembic/`, `backend/tests/`: migrations and verification.
 - `frontend/`: Streamlit pages, API client, tour and explanatory notes.
 - `fine_tuning/`: labeling, training, evaluation and model export experiments.

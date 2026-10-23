@@ -7,29 +7,27 @@ review event and audit entry in one transaction. Competing decisions produce
 one success and one 409 instructing the reviewer to reload. Rejection permanently
 invalidates that revision for approval, even if generation later fails.
 
-`case_version` advances on a committed classification outcome, generation request,
-review decision or worker completion. Dispatch-failure recovery also advances it
-to invalidate messages whose enqueue outcome is uncertain. `input_revision`
+`case_version` advances when successful classification, generation, review or a
+saved draft changes the case. Failed attempts preserve the job's expected version
+so a bounded retry can recover without inventing new input. `input_revision`
 advances when a new classification is accepted; future narrative/manual-label
-edits must advance it too. An approval changes case state without changing its
-inputs. Draft version numbers count saved response revisions; they are allocated
-while holding the case lock and protected by a unique constraint.
+edits must advance it too. Approval changes state without changing inputs. Draft
+version numbers count saved responses, allocated while holding the case lock and
+protected by a unique constraint.
 
-Both queue message types require `expected_case_version` and `input_revision`.
-Workers check eligibility before inference, release the read transaction during
-external work, and lock/recheck the case before committing a result. An old
-message or a result from an obsolete snapshot cannot reopen approved text or
-replace a newer draft. A claim does not advance versions, allowing a failed
-attempt to retry the same message. Classification-triggered work remains
-`escalated` during inference; explicit generation requests use `agent_triggered`.
+Durable jobs carry their own identity, expected case version and input revision.
+Workers check eligibility before inference, end the read transaction during
+external work, then lock the case and the owned job before persisting output.
+An expired lease, obsolete input or completed job cannot reopen approved text or
+replace a newer draft. Claims do not advance case versions. Classification-triggered
+work remains `escalated` during inference; explicit requests use `agent_triggered`.
 
-Duplicate inference calls can still occur. Only the first eligible completion
-can persist; this is not an exactly-once provider-execution guarantee. Stale
-attempt cost accounting, durable jobs, leases, bounded retries and automatic
-reconciliation remain separate work. A process crash between database commit and
-Redis publish can still strand accepted work. The endpoints report known dispatch
-failures, invalidate uncertain attempts and leave an explicit retry path; this
-does not close the crash window.
+A rejection and its replacement job commit together. Repeating the same rejection
+identity and feedback returns the original job; it does not repeat the review or
+reopen a later approval. Reusing a request key with different content returns 409.
+Duplicate external calls can still occur after lease expiry, but their persisted
+business effects are fenced. See [durable jobs](jobs.md) for admission, bounded
+attempts, staff retries and the migration boundary.
 
 ## Reviewer behavior
 
@@ -53,12 +51,11 @@ Do not mix old writers with the new version protocol: they do not advance case
 versions. Existing clients must reload; missing review identities fail closed.
 No shared database migration or deployment is performed by the local test suite.
 
-Inventory queued and in-flight work before cutover. Old unversioned messages are
-logged and discarded because they cannot prove their source snapshot. Requeue
-eligible pending classification and escalated resolution cases through the
-updated workspace endpoints. Inspect old `agent_triggered` cases separately;
-there is no automatic reconciliation yet. Do not reset approved or reviewable
-cases or replay historical rejection feedback to make a queue drain.
+Inventory queued and in-flight work before enabling the PostgreSQL producers and
+workers. The new binaries do not consume Redis streams. Existing stream messages
+and stranded cases need a reviewed reconciliation/cutover; the additive migration
+does not invent jobs for them. Do not reset approved or reviewable cases or replay
+historical rejection feedback to make a queue drain. See [jobs](jobs.md).
 
 PostgreSQL prevents updates to saved draft rows and updates/deletes to review
 events. Reviewed drafts cannot be deleted. Corrections require a new revision.
