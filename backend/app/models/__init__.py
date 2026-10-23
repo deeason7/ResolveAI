@@ -3,9 +3,19 @@
 from app.models.audit_log import AuditLog
 from app.models.complaint import Complaint
 from app.models.complaint_label import ComplaintLabel
+from app.models.job import Job
 from app.models.llm_log import LLMLog
 from app.models.resolution import Resolution
 from app.models.review_event import ReviewEvent
 from app.models.user import User
 
-__all__ = ["AuditLog", "Complaint", "ComplaintLabel", "LLMLog", "Resolution", "ReviewEvent", "User"]
+__all__ = [
+    "AuditLog",
+    "Complaint",
+    "ComplaintLabel",
+    "Job",
+    "LLMLog",
+    "Resolution",
+    "ReviewEvent",
+    "User",
+]

@@ -272,5 +272,5 @@ async def test_downgrade_refuses_to_erase_review_history(postgres_database, pg_s
     async with pg_sessionmaker() as session:
         assert len((await session.exec(select(ReviewEvent))).all()) == 1
         assert (
-            await session.scalar(text("SELECT version_num FROM alembic_version")) == "e6b4a9d2c705"
+            await session.scalar(text("SELECT version_num FROM alembic_version")) == "f7c5b0e3d816"
         )

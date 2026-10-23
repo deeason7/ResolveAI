@@ -103,3 +103,13 @@ application revision into an empty database migrated to that archived revision,
 then upgraded forward. The current restore refuses a mismatched table inventory
 or schema revision. Do not remove review history to make an old archive fit.
 Downgrading the review migration refuses to proceed once review events exist.
+
+## Durable job recovery
+
+The current table inventory includes jobs, request/review identities, payloads,
+attempt totals, retry generations and lease state. Stop old workers before restore.
+A matching worker release can reclaim an expired restored lease; provider calls
+may repeat, while completion remains subject to lease and input-version checks.
+The migration refuses to downgrade away durable job history. A pre-job archive
+needs its matching schema first, followed by forward migration and the separate
+[legacy work reconciliation](jobs.md#running-and-migration-boundary).

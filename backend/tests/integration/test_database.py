@@ -35,6 +35,7 @@ async def test_empty_database_migrates_to_head(pg_engine):
         "audit_logs",
         "complaint_labels",
         "complaints",
+        "jobs",
         "llm_logs",
         "resolutions",
         "review_events",

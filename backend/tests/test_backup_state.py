@@ -46,6 +46,7 @@ async def seed_rows(engine):
     from app.models.audit_log import AuditLog
     from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
     from app.models.complaint_label import ComplaintLabel
+    from app.models.job import Job, JobKind, JobStatus
     from app.models.llm_log import LLMLog
     from app.models.resolution import GuardrailStatus, Resolution
     from app.models.review_event import ReviewEvent
@@ -95,17 +96,49 @@ async def seed_rows(engine):
         )
         session.add(reviewed)
         await session.flush()
+        event = ReviewEvent(
+            complaint_id=historic.id,
+            resolution_id=reviewed.id,
+            user_id=user.id,
+            action="approved",
+            expected_case_version=1,
+            case_version=2,
+            input_revision=1,
+            draft_sha256=hashlib.sha256(reviewed.draft_text.encode()).hexdigest(),
+        )
+        session.add(event)
+        await session.flush()
         session.add_all(
             [
-                ReviewEvent(
+                Job(
                     complaint_id=historic.id,
-                    resolution_id=reviewed.id,
-                    user_id=user.id,
-                    action="approved",
-                    expected_case_version=1,
+                    kind=JobKind.index,
                     case_version=2,
                     input_revision=1,
-                    draft_sha256=hashlib.sha256(reviewed.draft_text.encode()).hexdigest(),
+                    idempotency_key="backup:review-index",
+                    requested_by=user.id,
+                    review_event_id=event.id,
+                    payload={"resolution_id": str(reviewed.id)},
+                    status=JobStatus.failed,
+                    attempts=3,
+                    total_attempts=6,
+                    retry_generation=1,
+                    last_retry_attempts=3,
+                    last_error_code="index_unavailable",
+                    completed_at=datetime(2026, 1, 3),
+                ),
+                Job(
+                    complaint_id=live.id,
+                    kind=JobKind.classification,
+                    case_version=1,
+                    input_revision=1,
+                    idempotency_key="backup:running-classification",
+                    status=JobStatus.running,
+                    attempts=1,
+                    total_attempts=1,
+                    lease_token=uuid.uuid4(),
+                    lease_expires_at=datetime(2026, 1, 3, 0, 2),
+                    heartbeat_at=datetime(2026, 1, 3),
                 ),
                 ComplaintLabel(
                     complaint_id=historic.id,
@@ -180,6 +213,7 @@ async def test_default_export_contains_complete_state(backup_engine, tmp_path):
     assert manifest["includes_complaints"] is True
     assert manifest["row_counts"]["complaints"] == 2
     assert manifest["row_counts"]["review_events"] == 1
+    assert manifest["row_counts"]["jobs"] == 2
     assert set(manifest["tables"]) == set(SQLModel.metadata.tables)
     assert manifest["alembic_revision"] == "test-schema-v1"
     assert archive.stat().st_mode & 0o777 == 0o700
