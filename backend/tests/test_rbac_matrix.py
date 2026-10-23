@@ -27,12 +27,19 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.models.user import UserRole
+from app.models.user import User, UserRole
 
 # One representative endpoint per guard class. call_kwargs go straight to
 # httpx.request. The admin body is schema-valid but points outside the import
 # sandbox, so an admin clears authz and stops at a 400 -- no real ingest fires.
 _ENDPOINTS = [
+    (
+        "writer",
+        "POST",
+        "/api/v1/jobs/00000000-0000-0000-0000-000000000001/retry",
+        {"json": {"expected_attempts": 3, "expected_retry_generation": 0}},
+    ),
+    ("writer", "GET", "/api/v1/jobs/", {}),
     ("reader", "GET", "/api/v1/workspace/board", {}),
     ("reader", "GET", "/api/v1/complaints/", {}),
     ("writer", "POST", "/api/v1/workspace/enqueue/classification", {"params": {"limit": 1}}),
@@ -71,23 +78,32 @@ _ROLES = [UserRole.admin, UserRole.analyst, UserRole.viewer]
 
 
 def test_matrix_covers_every_business_mutation():
-    from fastapi.routing import APIRoute
-
     from app.main import create_app
 
     actual = {
-        (method, route.path.replace("{complaint_id}", "00000000-0000-0000-0000-000000000001"))
-        for route in create_app().routes
-        if isinstance(route, APIRoute) and not route.path.startswith("/api/v1/auth/")
-        for method in route.methods
-        if method in {"POST", "PUT", "PATCH", "DELETE"}
+        (
+            method.upper(),
+            path.replace("{complaint_id}", "00000000-0000-0000-0000-000000000001").replace(
+                "{job_id}", "00000000-0000-0000-0000-000000000001"
+            ),
+        )
+        for path, operations in create_app().openapi()["paths"].items()
+        if not path.startswith("/api/v1/auth/")
+        for method in operations
+        if method.upper() in {"POST", "PUT", "PATCH", "DELETE"}
     }
     covered = {(method, url) for _, method, url, _ in _ENDPOINTS if method != "GET"}
     assert actual == covered
 
 
+_USERS = {
+    role: SimpleNamespace(id=uuid.uuid4(), email=f"{role.value}@test.com", role=role)
+    for role in _ROLES
+}
+
+
 def _user(role: UserRole) -> SimpleNamespace:
-    return SimpleNamespace(id=uuid.uuid4(), email=f"{role.value}@test.com", role=role)
+    return _USERS[role]
 
 
 @pytest_asyncio.fixture()
@@ -98,7 +114,21 @@ async def factory():
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
         await conn.run_sync(SQLModel.metadata.create_all)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with sessions() as session:
+        for role in _ROLES:
+            user = _USERS[role]
+            session.add(
+                User(
+                    id=user.id,
+                    email=user.email,
+                    role=role,
+                    full_name="Synthetic role",
+                    hashed_password="unused",
+                )
+            )
+        await session.commit()
+    yield sessions
 
 
 @pytest.fixture()

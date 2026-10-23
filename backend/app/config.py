@@ -6,7 +6,9 @@ running locally). Inside Docker every value comes from env_file in
 docker-compose.yml, so no .env file ships in the container image.
 """
 
-from pydantic import Field
+from typing import Literal
+
+from pydantic import Field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -52,6 +54,21 @@ class Settings(BaseSettings):
     # even when a consumer still has them pending, which would strand phantom
     # PEL rows pointing at messages that no longer exist. 0 disables trimming.
     stream_maxlen: int = Field(default=10000, ge=0)
+
+    # PostgreSQL is the only authoritative queue. Redis settings above are kept
+    # for the legacy cutover inventory; they never select a fallback worker.
+    job_backend: Literal["postgres"] = "postgres"
+    job_poll_seconds: float = Field(default=2.0, gt=0)
+    job_lease_seconds: float = Field(default=120.0, ge=1)
+    job_heartbeat_seconds: float = Field(default=30.0, gt=0)
+    job_max_pending: int = Field(default=10000, ge=1)
+    job_max_attempts: int = Field(default=3, ge=1, le=20)
+
+    @model_validator(mode="after")
+    def validate_job_timing(self):
+        if self.job_heartbeat_seconds >= self.job_lease_seconds:
+            raise ValueError("job_heartbeat_seconds must be less than job_lease_seconds")
+        return self
 
     # Qdrant
     qdrant_host: str = "qdrant"

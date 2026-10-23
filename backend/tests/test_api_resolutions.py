@@ -24,6 +24,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from app.config import settings
 from app.models.audit_log import AuditLog
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind
 from app.models.resolution import GuardrailStatus, Resolution
 from app.models.user import User, UserRole
 
@@ -165,12 +166,16 @@ class TestGenerate:
         r = await client.post(GENERATE_URL.format(id=cid))
 
         assert r.status_code == 202, r.text
-        assert r.json() == {"complaint_id": str(cid), "status": "queued"}
+        assert r.json()["complaint_id"] == str(cid)
+        assert r.json()["status"] == "queued"
+        assert r.json()["job_id"]
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.agent_triggered.value
-        entries = await fake_redis.xrange(settings.resolution_queue)
-        assert entries[0][1]["complaint_id"] == str(cid)
+        async with factory() as session:
+            job = (await session.exec(select(Job))).one()
+            assert job.complaint_id == cid
+            assert job.kind == JobKind.resolution
 
     async def test_unknown_complaint_is_404(self, client):
         r = await client.post(GENERATE_URL.format(id=uuid.uuid4()))
@@ -329,9 +334,11 @@ class TestReject:
         async with factory() as s:
             c = await s.get(Complaint, cid)
             assert c.status == ComplaintStatus.agent_triggered.value
-        entries = await fake_redis.xrange(settings.resolution_queue)
-        assert entries[0][1]["complaint_id"] == str(cid)
-        assert "FCRA" in entries[0][1]["feedback"]
+        async with factory() as session:
+            job = (await session.exec(select(Job))).one()
+            assert job.complaint_id == cid
+            assert job.kind == JobKind.resolution
+        assert "FCRA" in job.payload["feedback"]
         events = await _audit_events(factory)
         assert events[0].event == "resolution_rejected"
         assert events[0].metadata_["resolution_id"] == str(rid)
@@ -497,9 +504,7 @@ class TestExactReview:
             assert events[0].resolution_id == rid
         assert (await client.get(LATEST_URL.format(id=cid))).json()["review_action"] == "rejected"
 
-    async def test_enqueue_failure_preserves_rejection_and_allows_explicit_retry(
-        self, client, factory, monkeypatch
-    ):
+    async def test_job_insert_failure_rolls_back_review(self, client, factory, monkeypatch):
         from app.models.review_event import ReviewEvent
 
         cid = await _seed_complaint(factory, status=ComplaintStatus.draft_ready)
@@ -507,16 +512,13 @@ class TestExactReview:
         body = {**await _identity(client, cid), "feedback": "Please revise this response"}
 
         async def unavailable(*args, **kwargs):
-            raise ConnectionError("synthetic queue outage")
+            raise ConnectionError("synthetic database insert failure")
 
-        monkeypatch.setattr("app.api.routes.resolutions.enqueue_resolution", unavailable)
-        response = await client.post(REJECT_URL.format(id=cid), json=body)
-        assert response.status_code == 503
-        assert "saved" in response.json()["detail"]
+        monkeypatch.setattr("app.api.routes.resolutions.enqueue_job", unavailable)
+        with pytest.raises(ConnectionError):
+            await client.post(REJECT_URL.format(id=cid), json=body)
         async with factory() as session:
             case = await session.get(Complaint, cid)
-            assert (case.status, case.case_version) == (ComplaintStatus.needs_review, 3)
-            assert len((await session.exec(select(ReviewEvent))).all()) == 1
-        assert (
-            await client.post(APPROVE_URL.format(id=cid), json=await _identity(client, cid))
-        ).status_code == 409
+            assert (case.status, case.case_version) == (ComplaintStatus.draft_ready, 1)
+            assert (await session.exec(select(ReviewEvent))).all() == []
+            assert (await session.exec(select(Job))).all() == []

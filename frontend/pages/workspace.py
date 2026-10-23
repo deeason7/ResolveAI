@@ -1,13 +1,4 @@
-"""
-Workspace — the live control room for the classify -> resolve pipeline.
-
-Every complaint flows: pending -> classified | escalated -> agent_triggered ->
-draft_ready | needs_review -> response_approved. This page shows how many sit at each
-stage right now (the durable status counts) with the transient Redis stream
-state layered on top, and lets an operator push a batch of pending complaints
-into classification or escalated ones into the resolution agent, then watch
-them move with Refresh.
-"""
+"""Workspace: case progress, durable work health, and bounded operator actions."""
 
 from __future__ import annotations
 
@@ -51,20 +42,14 @@ def _stage_board(board: dict) -> None:
         )
 
 
-def _stream_row(label: str, info: dict) -> None:
-    lag = info["lag"]
-    cols = st.columns([2, 1, 1])
-    cols[0].markdown(f"**{label}**  \n`{info['name']}`")
-    cols[1].metric(
-        "Waiting",
-        f"{lag:,}" if lag is not None else "—",
-        help="Enqueued, not yet picked up by a worker",
-    )
-    cols[2].metric(
-        "In flight",
-        f"{info['in_flight']:,}",
-        help="Claimed by a worker — processing right now",
-    )
+def _job_row(info: dict) -> None:
+    cols = st.columns([2, 1, 1, 1, 1])
+    cols[0].markdown(f"**{info['kind'].title()}**")
+    cols[1].metric("Waiting", f"{info['queued']:,}")
+    cols[2].metric("In progress", f"{info['running']:,}")
+    cols[3].metric("Failed", f"{info['failed']:,}")
+    age = info["oldest_pending_age_seconds"]
+    cols[4].metric("Oldest pending", f"{int(age)}s" if age is not None else "—")
 
 
 st.title("⚙️ Workspace")
@@ -87,14 +72,43 @@ st.caption(f"{board['total']:,} complaints in the system — Refresh to re-poll 
 _stage_board(board)
 
 st.divider()
-st.subheader("Work streams")
-_stream_row("Classification", board["classification_stream"])
-_stream_row("Resolution", board["resolution_stream"])
-
+st.subheader("Processing jobs")
+for info in board["jobs"]:
+    _job_row(info)
 st.caption(
-    "Enqueued work moves only while a worker is attached — **In flight** turns positive when "
-    "one picks a task up. Watch the Pipeline counts above shift as a batch flows through."
+    f"New work is limited to {board['admission_limit']:,} outstanding jobs. "
+    "Accepted follow-up work is retained. Failed jobs need staff inspection."
 )
+
+staff = (api_client.current_user() or {}).get("role") in {"admin", "analyst"}
+if staff:
+    try:
+        failures = api_client.failed_jobs()
+    except ApiError as exc:
+        st.error(f"Could not load failed jobs: {exc.detail}")
+    else:
+        for job in failures["items"]:
+            with st.expander(f"{job['kind'].title()} failed · {job['complaint_id']}"):
+                st.write(f"Reason: {job['last_error_code'] or 'unknown'}")
+                st.caption(
+                    f"Attempts: {job['attempts']}/{job['max_attempts']} this retry; "
+                    f"{job['total_attempts']} total. Case version {job['case_version']}."
+                )
+                if st.button(
+                    "Retry failed job", key=f"retry_{job['id']}_{job['retry_generation']}"
+                ):
+                    try:
+                        api_client.retry_job(
+                            job["id"],
+                            expected_attempts=job["attempts"],
+                            expected_retry_generation=job["retry_generation"],
+                        )
+                    except ApiError as exc:
+                        st.error(f"Retry failed: {exc.detail}")
+                    else:
+                        st.rerun()
+        if failures["total"] > len(failures["items"]):
+            st.caption(f"Showing {len(failures['items'])} of {failures['total']} failed jobs.")
 
 st.divider()
 st.subheader("Add work")
@@ -119,7 +133,7 @@ with left:
     if st.button(
         "Enqueue for classification",
         use_container_width=True,
-        disabled=demo or board["pending"] == 0,
+        disabled=not staff or board["pending"] == 0,
         help=DEMO_HINT if demo else None,
     ):
         try:
@@ -145,7 +159,7 @@ with right:
     if st.button(
         "Enqueue for resolution",
         use_container_width=True,
-        disabled=demo or board["escalated"] == 0,
+        disabled=not staff or board["escalated"] == 0,
         help=DEMO_HINT if demo else None,
     ):
         try:

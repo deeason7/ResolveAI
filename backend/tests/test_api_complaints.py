@@ -132,15 +132,16 @@ class TestSubmit:
     async def test_submit_enqueues_for_classification(
         self, client: AsyncClient, analyst_token: str
     ):
-        from app.config import settings
-        from tests.conftest import _make_fake_redis
+        from app.database import AsyncSessionLocal
+        from app.models.job import Job, JobKind
 
         r = await client.post(COMPLAINTS_URL, json=VALID_COMPLAINT, headers=_auth(analyst_token))
         assert r.status_code == 201
-        cid = r.json()["id"]
-        # Same FakeServer as the app's overridden client — read the stream back.
-        entries = await _make_fake_redis().xrange(settings.classification_queue)
-        assert any(fields["complaint_id"] == cid for _id, fields in entries)
+        async with AsyncSessionLocal() as session:
+            jobs = (await session.exec(select(Job))).all()
+        assert len(jobs) == 1
+        assert str(jobs[0].complaint_id) == r.json()["id"]
+        assert jobs[0].kind == JobKind.classification
 
 
 # ── get by id ─────────────────────────────────────────────────────────────────

@@ -12,7 +12,7 @@
 #   - built images, no source bind-mounts, no uvicorn --reload
 #   - only Caddy is published to the internet (80/443); the API and every
 #     datastore stay on the internal network with no host ports
-#   - the two stream workers run as restart-on-failure services
+#   - the three PostgreSQL job workers run as restart-on-failure services
 #   - Ollama is opt-in behind the `local-llm` profile; by default we classify
 #     through Groq (LLM_SKIP_LOCAL=true) — the right call for ARM/low-RAM hosts
 #
@@ -100,16 +100,30 @@ services:
       - ./graph_seed:/graph_seed:ro
       - ./fine_tuning:/fine_tuning
 
-  # ── Stream workers (same image as the API, different entrypoint) ───────────
+  # ── PostgreSQL job workers (same image as the API, different entrypoint) ───────────
   classification-worker:
     <<: *backend-common
     image: resolveai/api:latest
     command: ["python", "-m", "app.workers.classification_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   resolution-worker:
     <<: *backend-common
     image: resolveai/api:latest
     command: ["python", "-m", "app.workers.resolution_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  index-worker:
+    <<: *backend-common
+    image: resolveai/api:latest
+    command: ["python", "-m", "app.workers.index_worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # ── Datastores (internal only — no host ports in prod) ─────────────────────
   postgres:

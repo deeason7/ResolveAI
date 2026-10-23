@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import logging
 from functools import lru_cache
+from hashlib import sha256
 from typing import Any
 from uuid import UUID
 
@@ -199,19 +200,40 @@ class GraphStore:
         issue: str | None,
         regulations: list[str] | None = None,
     ) -> None:
-        """Fold one freshly-classified complaint into the graph's aggregates.
+        """Apply each complaint's aggregate contribution once, including retries.
 
-        Ensures the Company/Product/Issue nodes exist and bumps the
-        HAS_COMPLAINTS_ABOUT / HAS_ISSUE edge counters; links VIOLATED edges for
-        any regulation ids the classifier surfaced.
-
-        NOTE: this increments counters, so it is NOT idempotent per complaint —
-        reprocessing the same complaint (possible under Redis at-least-once
-        delivery) double-counts. Acceptable for now; a Complaint-level dedup or
-        a per-complaint edge is the Phase 6 fix. Tracked in the phase notes.
+        A unique receipt and its counter increment commit in the same Neo4j
+        query. Existing aggregate baselines are preserved. Taxonomy corrections
+        still require rebuilding aggregates from canonical complaint data.
         """
-        if company and product:
+        if not ((company and product) or (product and issue) or regulations):
+            return
+        await self._run(
+            "CREATE CONSTRAINT complaint_contribution_id IF NOT EXISTS "
+            "FOR (r:ComplaintContribution) REQUIRE r.id IS UNIQUE",
+            write=True,
+        )
+
+        async def contribute(kind: str, targets: list[str], query: str, **params: Any) -> None:
+            receipt = sha256(repr((str(complaint_id), kind, targets)).encode()).hexdigest()
             await self._run(
+                """
+                MERGE (receipt:ComplaintContribution {id: $receipt_id})
+                  ON CREATE SET receipt.applied = false
+                SET receipt.locked = true
+                WITH receipt WHERE receipt.applied = false
+                """
+                + query
+                + "\nSET receipt.applied = true",
+                write=True,
+                receipt_id=receipt,
+                **params,
+            )
+
+        if company and product:
+            await contribute(
+                "company_product",
+                [company, product],
                 """
                 MERGE (c:Company {name: $company})
                   ON CREATE SET c.total_complaints = 0
@@ -220,12 +242,13 @@ class GraphStore:
                   ON CREATE SET h.count = 0
                 SET h.count = h.count + 1
                 """,
-                write=True,
                 company=company,
                 product=product,
             )
         if product and issue:
-            await self._run(
+            await contribute(
+                "product_issue",
+                [product, issue],
                 """
                 MERGE (p:Product {name: $product})
                 MERGE (i:Issue {name: $issue})
@@ -233,12 +256,13 @@ class GraphStore:
                   ON CREATE SET r.frequency = 0
                 SET r.frequency = r.frequency + 1
                 """,
-                write=True,
                 product=product,
                 issue=issue,
             )
         for reg_id in regulations or []:
-            await self._run(
+            await contribute(
+                "company_regulation",
+                [company or "Unknown", reg_id],
                 """
                 MATCH (r:Regulation {id: $reg_id})
                 MERGE (c:Company {name: $company})
@@ -246,7 +270,6 @@ class GraphStore:
                   ON CREATE SET v.count = 0
                 SET v.count = v.count + 1, v.last_date = date()
                 """,
-                write=True,
                 reg_id=reg_id,
                 company=company or "Unknown",
             )

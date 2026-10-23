@@ -1,66 +1,37 @@
-"""Tests for the Redis-stream classification worker.
-
-The worker is driven against real fakeredis streams, an in-memory Qdrant, and a
-stub classifier — no live Ollama/Postgres/Qdrant. ``embed_text`` is stubbed so
-the sentence-transformer model never loads.
-"""
+"""Classification output, telemetry and follow-up intents share one transaction."""
 
 from __future__ import annotations
 
-import uuid
-from unittest.mock import AsyncMock
+from datetime import datetime, timedelta
 
-import fakeredis.aioredis
 import pytest
 import pytest_asyncio
-from qdrant_client import QdrantClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from sqlmodel import SQLModel, select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.llm_log import LLMLog
 from app.schemas.classification import ComplaintClassification
 from app.services.classifier import ClassificationOutcome
-from app.services.vector_store import VectorStore
-from app.workers import classification_worker as cw
+from app.services.jobs import enqueue_job
 from app.workers.classification_worker import (
     ClassificationWorker,
     compute_priority_score,
-    enqueue_complaint,
     is_high_priority,
 )
-from app.workers.stream_utils import reclaim_stale_messages
-
-EMBED_DIM = 384
 
 
 @pytest_asyncio.fixture()
 async def factory():
-    import app.models  # noqa: F401 — registers tables on SQLModel.metadata
+    import app.models  # noqa: F401
     from app.database import engine
 
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
         await conn.run_sync(SQLModel.metadata.create_all)
     yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-
-@pytest.fixture()
-def redis_client():
-    return fakeredis.aioredis.FakeRedis(decode_responses=True)
-
-
-@pytest.fixture()
-def vector_store():
-    store = VectorStore(QdrantClient(":memory:"))
-    store.ensure_collection()
-    return store
-
-
-@pytest.fixture(autouse=True)
-def _stub_embed(monkeypatch):
-    monkeypatch.setattr(cw, "embed_text", lambda text: [0.01] * EMBED_DIM)
 
 
 def _outcome(*, sentiment="negative", urgency=3, succeeded=True, is_fallback=False):
@@ -86,393 +57,147 @@ def _outcome(*, sentiment="negative", urgency=3, succeeded=True, is_fallback=Fal
 class _StubClassifier:
     def __init__(self, outcome):
         self.outcome = outcome
-        self.calls: list[str] = []
+        self.calls = []
 
-    def classify(self, narrative, *, product=None, issue=None, company=None):
+    def classify(self, narrative, **_kwargs):
         self.calls.append(narrative)
         return self.outcome
 
 
-async def _seed(factory, **over) -> uuid.UUID:
-    fields = {
-        "narrative": "I want to dispute a fee",
-        "product": "Credit card",
-        "issue": "Fees",
-        "company": "Chase",
-    }
-    fields.update(over)
-    async with factory() as s:
-        c = Complaint(**fields)
-        s.add(c)
-        await s.commit()
-        return c.id
-
-
-def _worker(redis_client, factory, vector_store, outcome, graph_store=None):
-    return ClassificationWorker(
-        redis_client=redis_client,
-        classifier=_StubClassifier(outcome),
-        vector_store=vector_store,
-        session_factory=factory,
-        graph_store=graph_store,
-    )
-
-
-class TestPureHelpers:
-    def test_priority_extremes(self):
-        assert compute_priority_score(5, "extreme_negative") == 1.0
-        assert compute_priority_score(1, "neutral") == 0.0
-
-    def test_high_priority_conditions(self):
-        assert is_high_priority(4, "neutral") is True
-        assert is_high_priority(1, "extreme_negative") is True
-        assert is_high_priority(2, "negative") is False
-
-
-class TestProcessMessage:
-    async def test_classifies_and_persists(self, redis_client, factory, vector_store):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome(urgency=3))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
+async def _seed(factory, *, max_attempts=1, **overrides):
+    async with factory() as session:
+        case = Complaint(
+            narrative="Synthetic fee dispute",
+            company="Chase",
+            product="Credit card",
+            issue="Fees",
+            **overrides,
         )
-
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified
-            assert c.sentiment == "negative"
-            assert c.urgency == 3
-            assert c.priority_score is not None
-            assert c.classification_outcome == ClassificationState.succeeded
-            assert c.classification_source == "ollama"
-            assert c.classification_stale is False
-            assert c.classified_at is not None
-            logs = (await s.exec(select(LLMLog))).all()
-            assert len(logs) == 1
-            assert logs[0].operation == "classify"
-            assert logs[0].cost_usd == 0.0
-        assert vector_store.collection_count() == 1
-
-    async def test_outage_needs_triage_without_labels_or_downstream_work(
-        self, redis_client, factory, vector_store
-    ):
-        cid = await _seed(factory)
-        graph_store = AsyncMock()
-        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False), graph_store)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.needs_review
-            assert c.classification_outcome == ClassificationState.unavailable
-            assert c.sentiment is c.intent is c.urgency is c.priority_score is None
-            assert c.classification_source is None
-            assert c.classification_stale is False
-            assert c.classification_error == "providers_unavailable"
-            assert c.classification_latency_ms == 100
-            assert c.classification_attempted_at is not None
-            assert c.classified_at is None
-            log = (await s.exec(select(LLMLog))).one()
-            assert log.operation == "classify_unavailable"
-            assert log.latency_ms == 100
-            assert log.prompt_tokens is log.completion_tokens is log.cost_usd is None
-        assert vector_store.collection_count() == 0
-        assert await redis_client.xlen(w.settings.resolution_queue) == 0
-        graph_store.upsert_complaint_entities.assert_not_awaited()
-
-    async def test_failed_reclassification_retains_labels_and_provenance(
-        self, redis_client, factory, vector_store
-    ):
-        cid = await _seed(
-            factory,
-            status=ComplaintStatus.classified,
-            sentiment="neutral",
-            intent="information_request",
-            urgency=1,
-            priority_score=0.0,
-            classification_outcome=ClassificationState.succeeded,
-            classification_source="groq",
-            classification_was_fallback=True,
-        )
-        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified
-            assert (c.sentiment, c.intent, c.urgency, c.priority_score) == (
-                "neutral",
-                "information_request",
-                1,
-                0.0,
-            )
-            assert c.classification_outcome == ClassificationState.unavailable
-            assert c.classification_source == "groq"
-            assert c.classification_was_fallback is True
-            assert c.classification_stale is True
-        assert vector_store.collection_count() == 0
-
-    @pytest.mark.parametrize("manual", [False, True])
-    async def test_replay_preserves_resolved_or_manual_case(
-        self, redis_client, factory, vector_store, manual
-    ):
-        cid = await _seed(
-            factory,
-            status=ComplaintStatus.classified if manual else ComplaintStatus.resolved,
-            sentiment="neutral",
-            intent="information_request",
-            urgency=1,
-            classification_source="manual" if manual else "ollama",
-            classification_outcome=ClassificationState.manual
-            if manual
-            else ClassificationState.succeeded,
-        )
-        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        assert w.classifier.calls == []
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.urgency == 1
-            assert c.classification_outcome == (
-                ClassificationState.manual if manual else ClassificationState.succeeded
-            )
-
-    async def test_decision_during_inference_is_not_overwritten(
-        self, redis_client, factory, vector_store, monkeypatch
-    ):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome(succeeded=False))
-
-        async def change_case_then_return(*args, **kwargs):
-            async with factory() as s:
-                c = await s.get(Complaint, cid)
-                c.status = ComplaintStatus.resolved
-                c.sentiment = "neutral"
-                s.add(c)
-                await s.commit()
-            return _outcome(succeeded=False)
-
-        monkeypatch.setattr(cw.asyncio, "to_thread", change_case_then_return)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.resolved
-            assert c.sentiment == "neutral"
-            assert c.classification_outcome == ClassificationState.pending
-            assert (await s.exec(select(LLMLog))).all() == []
-
-    async def test_high_priority_escalates(self, redis_client, factory, vector_store):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome(urgency=5))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.escalated
-
-    async def test_successful_fallback_persists_provider_provenance(
-        self, redis_client, factory, vector_store
-    ):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome(is_fallback=True))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.classification_outcome == ClassificationState.succeeded
-            assert c.classification_source == "groq"
-            assert c.classification_was_fallback is True
-            assert c.classification_error is None
-
-    async def test_missing_complaint_is_poison(self, redis_client, factory, vector_store):
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        # Returns normally so the caller acks; nothing to update.
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(uuid.uuid4())}
-        )
-
-    async def test_bad_uuid_is_poison(self, redis_client, factory, vector_store):
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": "not-a-uuid"}
-        )
-
-    async def test_vector_failure_still_commits(
-        self, redis_client, factory, vector_store, monkeypatch
-    ):
-        cid = await _seed(factory)
-
-        def _boom(text):
-            raise RuntimeError("qdrant down")
-
-        monkeypatch.setattr(cw, "embed_text", _boom)
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )  # must not raise
-
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified  # postgres committed
-
-    async def test_graph_upsert_called_with_structured_fields(
-        self, redis_client, factory, vector_store
-    ):
-        cid = await _seed(factory, company="Wells Fargo", product="Mortgage", issue="Servicing")
-        graph_store = AsyncMock()
-        w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        graph_store.upsert_complaint_entities.assert_awaited_once_with(
-            complaint_id=str(cid),
-            company="Wells Fargo",
-            product="Mortgage",
-            issue="Servicing",
-        )
-
-    async def test_graph_failure_still_commits(self, redis_client, factory, vector_store):
-        cid = await _seed(factory)
-        graph_store = AsyncMock()
-        graph_store.upsert_complaint_entities.side_effect = RuntimeError("neo4j down")
-        w = _worker(redis_client, factory, vector_store, _outcome(), graph_store=graph_store)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )  # must not raise
-
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified  # postgres committed
-
-    async def test_no_graph_store_skips_upsert(self, redis_client, factory, vector_store):
-        # The default wiring (graph_store=None) must not blow up — the write is skipped.
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified
+        session.add(case)
+        job = await enqueue_job(session, case, JobKind.classification, max_attempts=max_attempts)
+        await session.commit()
+        return case.id, job.id
 
 
-class TestStreamIntegration:
-    async def test_ensure_group_is_idempotent(self, redis_client, factory, vector_store):
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.ensure_group()
-        await w.ensure_group()  # second call must not raise BUSYGROUP
-
-    async def test_enqueue_then_handle_acks(self, redis_client, factory, vector_store):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome())
-        await w.ensure_group()
-        await enqueue_complaint(
-            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
-        )
-
-        resp = await redis_client.xreadgroup(
-            groupname=w.group,
-            consumername=w.consumer,
-            streams={w.stream: ">"},
-            count=10,
-        )
-        _stream, messages = resp[0]
-        message_id, fields = messages[0]
-        assert fields["complaint_id"] == str(cid)
-
-        await w._handle(message_id, fields)
-        summary = await redis_client.xpending(w.stream, w.group)
-        assert summary["pending"] == 0
-
-    async def test_reclaims_message_stranded_by_dead_consumer(
-        self, redis_client, factory, vector_store
-    ):
-        # A different consumer reads the message and 'dies' without acking, so it
-        # sits in the PEL. The reclaimer hands it to THIS worker's _handle, which
-        # runs the real classify + persist + ack path.
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, vector_store, _outcome(urgency=3))
-        await w.ensure_group()
-        await enqueue_complaint(
-            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
-        )
-        await redis_client.xreadgroup(
-            groupname=w.group, consumername="dead-worker", streams={w.stream: ">"}, count=10
-        )
-        assert (await redis_client.xpending(w.stream, w.group))["pending"] == 1
-
-        reclaimed = await reclaim_stale_messages(
-            redis_client,
-            stream=w.stream,
-            group=w.group,
-            consumer=w.consumer,
-            handle=w._handle,
-            min_idle_ms=0,
-        )
-        assert reclaimed == 1
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.classified  # processed end-to-end
-        assert (await redis_client.xpending(w.stream, w.group))["pending"] == 0  # acked, PEL clear
+def test_priority_helpers():
+    assert compute_priority_score(5, "extreme_negative") == 1.0
+    assert compute_priority_score(1, "neutral") == 0.0
+    assert is_high_priority(4, "neutral")
+    assert is_high_priority(1, "extreme_negative")
+    assert not is_high_priority(2, "negative")
 
 
-class TestPollCadence:
-    """The knobs that bound idle Redis command volume on a command-billed tier
-    (Upstash free). ``_tick`` is driven directly so the gate is tested without
-    running the unbounded ``run`` loop.
-    """
-
-    async def test_sweeps_only_every_nth_cycle_and_honors_block(
-        self, redis_client, factory, vector_store, monkeypatch
-    ):
-        from app.config import Settings
-
-        sweeps = AsyncMock(return_value=0)
-        monkeypatch.setattr(cw, "reclaim_stale_messages", sweeps)
-        # Empty stream: stub the read so a real BLOCK never stalls the test.
-        redis_client.xreadgroup = AsyncMock(return_value=[])
-
-        settings = Settings(worker_reclaim_every=3, worker_block_ms=250)
-        w = ClassificationWorker(
-            redis_client=redis_client,
-            classifier=_StubClassifier(_outcome()),
-            vector_store=vector_store,
-            session_factory=factory,
-            settings=settings,
-        )
-
-        for cycle in range(6):
-            await w._tick(cycle)
-
-        assert sweeps.await_count == 2  # only cycles 0 and 3
-        assert redis_client.xreadgroup.await_args.kwargs["block"] == 250
-
-
-async def test_unversioned_classification_trigger_fails_closed(factory, redis_client, vector_store):
-    cid = await _seed(factory)
-    worker = _worker(redis_client, factory, vector_store, _outcome())
-    await worker.process_message({"complaint_id": str(cid)})
-    assert worker.classifier.calls == []
-
-
-async def test_replay_after_classification_does_not_change_input_revision(
-    factory, redis_client, vector_store
-):
-    cid = await _seed(factory)
-    worker = _worker(redis_client, factory, vector_store, _outcome())
-    message = {"complaint_id": str(cid), "expected_case_version": "1", "input_revision": "1"}
-    await worker.process_message(message)
-    await worker.process_message(message)
-    assert len(worker.classifier.calls) == 1
+@pytest.mark.parametrize("high,fallback", [(False, False), (True, False), (False, True)])
+async def test_classification_commits_telemetry_and_downstream_intents(factory, high, fallback):
+    cid, jid = await _seed(factory)
+    classifier = _StubClassifier(_outcome(urgency=5 if high else 3, is_fallback=fallback))
+    worker = ClassificationWorker(classifier, session_factory=factory)
+    assert await worker.run_once()
+    assert not await worker.run_once()
+    assert len(classifier.calls) == 1
     async with factory() as session:
         case = await session.get(Complaint, cid)
+        assert case.status == (ComplaintStatus.escalated if high else ComplaintStatus.classified)
+        assert case.classification_outcome == ClassificationState.succeeded
+        assert case.classification_source == ("groq" if fallback else "ollama")
+        assert case.classification_was_fallback == fallback
+        assert case.classification_stale is False
         assert case.case_version == case.input_revision == 2
+        assert case.classified_at is not None
+        logs = (await session.exec(select(LLMLog))).all()
+        assert len(logs) == 1 and logs[0].operation == "classify"
+        jobs = (await session.exec(select(Job))).all()
+        assert (await session.get(Job, jid)).status == JobStatus.succeeded
+        followups = [job for job in jobs if job.id != jid]
+        assert {job.kind for job in followups} == (
+            {JobKind.index, JobKind.resolution} if high else {JobKind.index}
+        )
+        assert all(
+            job.status == JobStatus.queued and job.case_version == job.input_revision == 2
+            for job in followups
+        )
+
+
+async def test_provider_failure_retries_then_exhausts_visibly(factory):
+    cid, jid = await _seed(factory, max_attempts=2)
+    classifier = _StubClassifier(_outcome(succeeded=False))
+    worker = ClassificationWorker(classifier, session_factory=factory)
+    await worker.run_once()
+    async with factory() as session:
+        job = await session.get(Job, jid)
+        assert job.status == JobStatus.queued
+        assert job.attempts == 1
+        job.next_attempt_at = datetime.utcnow() - timedelta(seconds=1)
+        await session.commit()
+    await worker.run_once()
+    assert not await worker.run_once()
+    async with factory() as session:
+        case = await session.get(Complaint, cid)
+        job = await session.get(Job, jid)
+        assert job.status == JobStatus.failed and job.attempts == 2
+        assert job.last_error_code == "providers_unavailable"
+        assert case.status == ComplaintStatus.needs_review
+        assert case.classification_outcome == ClassificationState.unavailable
+        assert case.sentiment is case.intent is case.urgency is None
+        assert case.classification_source is None
+        assert case.case_version == case.input_revision == 1
+        logs = (await session.exec(select(LLMLog))).all()
+        assert len(logs) == 2
+        assert all(log.operation == "classify_unavailable" and log.cost_usd is None for log in logs)
+        assert len((await session.exec(select(Job))).all()) == 1
+
+
+async def test_failed_reclassification_retains_provenance(factory):
+    cid, _ = await _seed(
+        factory,
+        status=ComplaintStatus.classified,
+        sentiment="neutral",
+        intent="information_request",
+        urgency=1,
+        classification_source="groq",
+        classification_was_fallback=True,
+        classification_outcome=ClassificationState.succeeded,
+    )
+    await ClassificationWorker(
+        _StubClassifier(_outcome(succeeded=False)), session_factory=factory
+    ).run_once()
+    async with factory() as session:
+        case = await session.get(Complaint, cid)
+        assert (case.sentiment, case.intent, case.urgency) == ("neutral", "information_request", 1)
+        assert case.classification_source == "groq" and case.classification_was_fallback
+        assert case.classification_stale
+
+
+@pytest.mark.parametrize("manual", [False, True])
+async def test_approved_or_manual_case_supersedes_trigger(factory, manual):
+    cid, jid = await _seed(
+        factory,
+        status=ComplaintStatus.classified if manual else ComplaintStatus.response_approved,
+        classification_source="manual" if manual else "ollama",
+    )
+    classifier = _StubClassifier(_outcome())
+    await ClassificationWorker(classifier, session_factory=factory).run_once()
+    assert classifier.calls == []
+    async with factory() as session:
+        assert (await session.get(Job, jid)).status == JobStatus.superseded
+        assert (await session.exec(select(LLMLog))).all() == []
+
+
+async def test_failed_followup_insert_rolls_back_result_and_telemetry(factory, monkeypatch):
+    from app.workers import classification_worker
+
+    cid, jid = await _seed(factory)
+
+    async def fail(*_a, **_kw):
+        raise ConnectionError("private provider detail")
+
+    monkeypatch.setattr(classification_worker, "enqueue_job", fail)
+    await ClassificationWorker(
+        _StubClassifier(_outcome(urgency=5)), session_factory=factory
+    ).run_once()
+    async with factory() as session:
+        assert (await session.get(Complaint, cid)).case_version == 1
+        assert (await session.exec(select(LLMLog))).all() == []
+        job = await session.get(Job, jid)
+        assert job.status == JobStatus.failed
+        assert job.last_error_code == "dependency_unavailable"

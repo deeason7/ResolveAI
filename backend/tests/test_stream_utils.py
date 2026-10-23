@@ -1,4 +1,4 @@
-"""Tests for the shared stream reclaimer.
+"""Historical Redis inventory helpers retained for the FIX-08 cutover.
 
 Driven against real fakeredis streams: produce, create a group, have one
 consumer read (parking entries in the PEL), then verify reclaim behaviour.
@@ -107,59 +107,3 @@ class TestStreamRetention:
     def test_zero_disables_trimming(self, monkeypatch):
         monkeypatch.setattr(settings, "stream_maxlen", 0)
         assert trim_kwargs() == {}
-
-    async def test_producers_bound_the_stream(self, redis_client, monkeypatch):
-        """The regression that matters: an acked entry still occupies the stream."""
-        from app.workers.classification_worker import enqueue_complaint
-
-        monkeypatch.setattr(settings, "stream_maxlen", 5)
-        for i in range(40):
-            await enqueue_complaint(
-                redis_client,
-                f"00000000-0000-0000-0000-{i:012d}",
-                expected_case_version=1,
-                input_revision=1,
-                stream="s",
-            )
-
-        length = await redis_client.xlen("s")
-        assert length <= 40, "trimming should not grow the stream"
-        assert length < 40, "40 XADDs against maxlen=5 must have trimmed something"
-
-    async def test_acked_entries_still_count_toward_length(self, redis_client, monkeypatch):
-        """Documents *why* the cap exists, so nobody removes it as redundant."""
-        monkeypatch.setattr(settings, "stream_maxlen", 0)
-        from app.workers.classification_worker import enqueue_complaint
-
-        for i in range(3):
-            await enqueue_complaint(
-                redis_client,
-                f"00000000-0000-0000-0000-{i:012d}",
-                expected_case_version=1,
-                input_revision=1,
-                stream="s",
-            )
-        await redis_client.xgroup_create("s", "g", id="0")
-        msgs = await redis_client.xreadgroup("g", "c", {"s": ">"}, count=10)
-        for _stream, entries in msgs:
-            for message_id, _fields in entries:
-                await redis_client.xack("s", "g", message_id)
-
-        groups = await redis_client.xinfo_groups("s")
-        assert groups[0]["pending"] == 0, "everything acked"
-        assert await redis_client.xlen("s") == 3, "yet the entries remain in the stream"
-
-    async def test_resolution_producer_is_capped_too(self, redis_client, monkeypatch):
-        from app.workers.resolution_worker import enqueue_resolution
-
-        monkeypatch.setattr(settings, "stream_maxlen", 5)
-        for i in range(40):
-            await enqueue_resolution(
-                redis_client,
-                f"00000000-0000-0000-0000-{i:012d}",
-                expected_case_version=1,
-                input_revision=1,
-                stream="r",
-            )
-
-        assert await redis_client.xlen("r") < 40

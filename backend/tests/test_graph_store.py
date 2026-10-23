@@ -231,13 +231,13 @@ class TestUpsert:
     async def test_company_and_product_increment(self, store, driver):
         await store.upsert_complaint_entities("cid", "ACME", "Mortgage", None)
         # one write for the company/product edge
-        query = driver.execute_query.call_args_list[0][0][0]
+        query = driver.execute_query.call_args_list[1][0][0]
         assert "HAS_COMPLAINTS_ABOUT" in query
-        assert driver.execute_query.call_args_list[0][1]["company"] == "ACME"
+        assert driver.execute_query.call_args_list[1][1]["company"] == "ACME"
 
     async def test_product_and_issue_increment(self, store, driver):
         await store.upsert_complaint_entities("cid", None, "Mortgage", "Servicing")
-        query = driver.execute_query.call_args_list[0][0][0]
+        query = driver.execute_query.call_args_list[1][0][0]
         assert "HAS_ISSUE" in query
 
     async def test_regulations_create_violated_edges(self, store, driver):
@@ -250,6 +250,16 @@ class TestUpsert:
     async def test_all_none_is_noop(self, store, driver):
         await store.upsert_complaint_entities("cid", None, None, None)
         driver.execute_query.assert_not_called()
+
+    async def test_retry_reuses_atomic_contribution_receipt(self, store, driver):
+        await store.upsert_complaint_entities("cid", "ACME", "Mortgage", None)
+        first = driver.execute_query.call_args
+        await store.upsert_complaint_entities("cid", "ACME", "Mortgage", None)
+        second = driver.execute_query.call_args
+        assert first.kwargs["receipt_id"] == second.kwargs["receipt_id"]
+        assert "receipt.applied = false" in first.args[0]
+        assert "receipt.applied = true" in first.args[0]
+        assert "REQUIRE r.id IS UNIQUE" in driver.execute_query.call_args_list[0].args[0]
 
     async def test_writes_use_write_routing(self, store, driver):
         from neo4j import RoutingControl

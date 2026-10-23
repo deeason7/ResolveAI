@@ -1,205 +1,108 @@
-"""
-Pipeline Workspace endpoints — the live control surface over the
-classify -> resolve pipeline:
-
-  GET  /workspace/board                  — stage counts + stream telemetry
-  POST /workspace/enqueue/classification — push N pending complaints to classify
-  POST /workspace/enqueue/resolution     — push N escalated complaints to the agent
-
-The board reads stage counts from complaint.status (the durable signal the
-workers write transactionally) and overlays best-effort Redis stream state
-(in-flight / consumers / lag). The enqueue routes reuse the same producer
-functions the submit and /generate routes use, so there's a single definition
-of each stream's message shape.
-"""
+"""Pipeline counts and bounded transactional operator batches."""
 
 from __future__ import annotations
 
-import logging
+from datetime import datetime
 
-import redis.asyncio as aioredis
 from fastapi import APIRouter, Depends, Query, Request
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
-from app.core.deps import get_current_user, get_redis, require_writer
+from app.core.deps import get_current_user, require_writer
 from app.database import get_session
 from app.middleware.rate_limit import limiter
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.user import User
-from app.schemas.workspace import EnqueueResult, StreamInfo, WorkspaceBoard
-from app.services.case_transitions import TERMINAL_STATUSES, advance_case, lock_case
-from app.workers.classification_worker import enqueue_complaint
-from app.workers.resolution_worker import enqueue_resolution
+from app.schemas.job import JobQueueInfo
+from app.schemas.workspace import EnqueueResult, WorkspaceBoard
+from app.services.case_transitions import TERMINAL_STATUSES
+from app.services.job_batches import BATCH_MAX, enqueue_batch
 
-logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/workspace", tags=["workspace"])
-
-# Cap per enqueue so one click can't flood a stream with the whole 200K backlog.
-_BATCH_MAX = 500
-
-# These two routes each kick off real work (up to _BATCH_MAX XADDs, and for
-# resolution a same-transaction status flip on every row). They ride the global
-# 200/min like everything else, but also get a tighter dedicated cap so a stuck
-# client or a refresh loop can't machine-gun batches. The board GET stays on the
-# global limit — it's a cheap read meant for polling.
 _ENQUEUE_RATE_LIMIT = "10/minute"
 
 
-async def _stream_info(redis: aioredis.Redis, stream: str) -> StreamInfo:
-    """Sum pending / consumers / lag across a stream's consumer groups.
-
-    Wrapped in try/except: the stream and its groups don't exist until a worker
-    runs ensure_group, and the XINFO lag field is Redis 7+. A miss returns
-    zeros / None so the board never fails on the transient telemetry layer.
-    """
-    in_flight = consumers = 0
-    lag: int | None = None
-    try:
-        for group in await redis.xinfo_groups(stream):
-            in_flight += int(group.get("pending", 0) or 0)
-            consumers += int(group.get("consumers", 0) or 0)
-            group_lag = group.get("lag")
-            if group_lag is not None:
-                lag = (lag or 0) + int(group_lag)
-    except Exception:  # noqa: BLE001 — best-effort telemetry, never fatal
-        logger.debug("stream info unavailable for %s (no consumer group yet?)", stream)
-    return StreamInfo(name=stream, in_flight=in_flight, consumers=consumers, lag=lag)
+async def job_health(session: AsyncSession) -> list[JobQueueInfo]:
+    rows = (
+        await session.exec(
+            select(Job.kind, Job.status, func.count(Job.id)).group_by(Job.kind, Job.status)
+        )
+    ).all()
+    counts = {(kind, state): count for kind, state, count in rows}
+    oldest = dict(
+        (
+            await session.exec(
+                select(Job.kind, func.min(Job.created_at))
+                .where(Job.status.in_([JobStatus.queued, JobStatus.running]))
+                .group_by(Job.kind)
+            )
+        ).all()
+    )
+    now = datetime.utcnow()
+    return [
+        JobQueueInfo(
+            kind=kind,
+            **{state.value: counts.get((kind, state), 0) for state in JobStatus},
+            oldest_pending_age_seconds=max(0.0, (now - oldest[kind]).total_seconds())
+            if kind in oldest
+            else None,
+        )
+        for kind in JobKind
+    ]
 
 
 @router.get("/board", response_model=WorkspaceBoard)
 async def board(
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
     _: User = Depends(get_current_user),
 ) -> WorkspaceBoard:
-    """Live pipeline board: one count per complaint status, plus stream state."""
     rows = (
         await session.exec(
             select(Complaint.status, func.count(Complaint.id)).group_by(Complaint.status)
         )
     ).all()
-    # status round-trips as the enum (EnumString), so key on .value — str(enum)
-    # would yield "ComplaintStatus.pending" on 3.11 and miss every lookup.
-    counts = {status_value.value: count for status_value, count in rows}
-
-    def n(stage: ComplaintStatus) -> int:
-        return int(counts.get(stage.value, 0))
-
-    return WorkspaceBoard(
-        pending=n(ComplaintStatus.pending),
-        classified=n(ComplaintStatus.classified),
-        escalated=n(ComplaintStatus.escalated),
-        agent_triggered=n(ComplaintStatus.agent_triggered),
-        draft_ready=n(ComplaintStatus.draft_ready),
-        needs_review=n(ComplaintStatus.needs_review),
-        resolved=n(ComplaintStatus.resolved),
-        response_approved=n(ComplaintStatus.response_approved),
-        total=sum(int(c) for c in counts.values()),
-        classification_unavailable=(
-            await session.exec(
-                select(func.count(Complaint.id)).where(
-                    Complaint.classification_outcome == ClassificationState.unavailable,
-                    Complaint.status.not_in(TERMINAL_STATUSES),
-                )
+    counts = {state.value: count for state, count in rows}
+    unavailable = (
+        await session.exec(
+            select(func.count(Complaint.id)).where(
+                Complaint.classification_outcome == ClassificationState.unavailable,
+                Complaint.status.not_in(TERMINAL_STATUSES),
             )
-        ).one(),
-        classification_stream=await _stream_info(redis, settings.classification_queue),
-        resolution_stream=await _stream_info(redis, settings.resolution_queue),
+        )
+    ).one()
+    return WorkspaceBoard(
+        **{state.value: counts.get(state.value, 0) for state in ComplaintStatus},
+        total=sum(counts.values()),
+        classification_unavailable=unavailable,
+        jobs=await job_health(session),
+        admission_limit=settings.job_max_pending,
     )
 
 
 @router.post("/enqueue/classification", response_model=EnqueueResult)
 @limiter.limit(_ENQUEUE_RATE_LIMIT)
 async def enqueue_classification(
-    request: Request,  # required by slowapi's per-route limiter for the key func
-    limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=BATCH_MAX),
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(require_writer),
+    current_user: User = Depends(require_writer),
 ) -> EnqueueResult:
-    """Push up to `limit` still-pending complaints onto the classification stream.
-
-    Status stays `pending` — that's the durable signal; the worker flips it to
-    classified / escalated when it lands. Re-running is safe (at-least-once): a
-    complaint the worker hasn't reached yet may be enqueued again and simply
-    re-classified, never corrupted.
-    """
-    ids = (
-        await session.exec(
-            select(Complaint).where(Complaint.status == ComplaintStatus.pending).limit(limit)
-        )
-    ).all()
+    jobs = await enqueue_batch(session, JobKind.classification, limit, requested_by=current_user.id)
     await session.commit()
-    for complaint in ids:
-        await enqueue_complaint(
-            redis,
-            complaint.id,
-            expected_case_version=complaint.case_version,
-            input_revision=complaint.input_revision,
-        )
-    logger.info("workspace: enqueued %d complaints for classification", len(ids))
-    return EnqueueResult(enqueued=len(ids), stream=settings.classification_queue)
+    return EnqueueResult(enqueued=len(jobs), kind=JobKind.classification)
 
 
 @router.post("/enqueue/resolution", response_model=EnqueueResult)
 @limiter.limit(_ENQUEUE_RATE_LIMIT)
 async def enqueue_resolution_batch(
-    request: Request,  # required by slowapi's per-route limiter for the key func
-    limit: int = Query(default=50, ge=1, le=_BATCH_MAX),
+    request: Request,
+    limit: int = Query(default=50, ge=1, le=BATCH_MAX),
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(require_writer),
+    current_user: User = Depends(require_writer),
 ) -> EnqueueResult:
-    """Push up to `limit` escalated complaints to the resolution agent.
-
-    Mirrors /resolutions/{id}/generate for a batch: flip escalated ->
-    agent_triggered in this transaction so a re-run can't double-draft the same
-    complaint. Commit before Redis I/O; on dispatch failure invalidate the
-    uncertain attempts and return still-current cases to escalated for retry.
-    """
-    complaints = (
-        await session.exec(
-            select(Complaint)
-            .where(
-                Complaint.status == ComplaintStatus.escalated,
-                Complaint.classification_outcome != ClassificationState.unavailable,
-                Complaint.classification_stale.is_(False),
-            )
-            .order_by(Complaint.id)
-            .limit(limit)
-            .with_for_update(skip_locked=True)
-        )
-    ).all()
-    for complaint in complaints:
-        # Flip escalated -> agent_triggered (mirrors /generate's per-object flip)
-        # so a re-run can't re-select and double-draft the same complaint.
-        complaint.status = ComplaintStatus.agent_triggered
-        advance_case(complaint)
-        session.add(complaint)
-    attempts = [(c.id, c.case_version, c.input_revision) for c in complaints]
+    jobs = await enqueue_batch(session, JobKind.resolution, limit, requested_by=current_user.id)
     await session.commit()
-    try:
-        for complaint_id, case_version, input_revision in attempts:
-            await enqueue_resolution(
-                redis,
-                complaint_id,
-                expected_case_version=case_version,
-                input_revision=input_revision,
-            )
-    except Exception:
-        # Invalidate uncertain/undispatched attempts so an old message cannot
-        # race a later explicit retry. Durable dispatch is separate work.
-        for complaint_id, case_version, _ in attempts:
-            current = await lock_case(session, complaint_id)
-            if current and current.case_version == case_version:
-                current.status = ComplaintStatus.escalated
-                advance_case(current)
-                session.add(current)
-        await session.commit()
-        raise
-
-    logger.info("workspace: enqueued %d complaints for resolution", len(complaints))
-    return EnqueueResult(enqueued=len(complaints), stream=settings.resolution_queue)
+    return EnqueueResult(enqueued=len(jobs), kind=JobKind.resolution)

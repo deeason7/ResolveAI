@@ -5,15 +5,16 @@ from __future__ import annotations
 import logging
 import uuid
 
-import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, Header, HTTPException, status
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.deps import get_current_user, get_redis, require_writer
+from app.config import settings
+from app.core.deps import get_current_user, require_writer
 from app.database import get_session
 from app.models.audit_log import AuditLog
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.resolution import Resolution
 from app.models.review_event import ReviewEvent
 from app.models.user import User
@@ -31,7 +32,8 @@ from app.services.case_transitions import (
     lock_case,
     review_revision,
 )
-from app.workers.resolution_worker import enqueue_resolution
+from app.services.job_requests import admit, fingerprint, replay, request_identity
+from app.services.jobs import enqueue_job
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/resolutions", tags=["resolutions"])
@@ -48,43 +50,6 @@ def _require_current_classification(complaint: Complaint) -> None:
         raise conflict("Complaint needs a current classification before generating a draft")
 
 
-async def _queue_after_commit(
-    session: AsyncSession,
-    redis: aioredis.Redis,
-    complaint: Complaint,
-    *,
-    feedback: str | None = None,
-) -> None:
-    """Release the case lock before Redis I/O. Durable transactional dispatch is separate work.
-
-    An uncertain enqueue outcome invalidates this attempt, preserving any review
-    decision while allowing a new explicit generation request.
-    """
-    case_version, input_revision = complaint.case_version, complaint.input_revision
-    complaint_id = complaint.id
-    await session.commit()
-    try:
-        await enqueue_resolution(
-            redis,
-            complaint_id,
-            expected_case_version=case_version,
-            input_revision=input_revision,
-            feedback=feedback,
-        )
-    except Exception:
-        current = await lock_case(session, complaint_id)
-        if current and current.case_version == case_version:
-            current.status = ComplaintStatus.needs_review
-            advance_case(current)
-            session.add(current)
-            await session.commit()
-        logger.exception("Generation dispatch failed for %s", complaint_id)
-        raise HTTPException(
-            503,
-            "Case changes were saved, but dispatch confirmation is unavailable. Reload the case to check its state before trying generation again.",
-        ) from None
-
-
 @router.post(
     "/{complaint_id}/generate",
     response_model=ResolutionQueued,
@@ -93,13 +58,38 @@ async def _queue_after_commit(
 async def generate_resolution(
     complaint_id: uuid.UUID,
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(require_writer),
+    current_user: User = Depends(require_writer),
+    idempotency_key: str | None = Header(default=None, min_length=1, max_length=128),
 ) -> ResolutionQueued:
+    await admit(session)
+    key = request_identity(current_user.id, f"resolutions.generate:{complaint_id}", idempotency_key)
+    request_fingerprint = fingerprint({"complaint_id": complaint_id})
+    existing = await replay(session, key, request_fingerprint)
+    if existing is not None:
+        return ResolutionQueued(
+            complaint_id=complaint_id, job_id=existing.id, status=existing.status
+        )
     complaint = await lock_case(session, complaint_id)
     if complaint is None:
         raise HTTPException(404, "Complaint not found")
     _require_current_classification(complaint)
+    current_job = (
+        await session.exec(
+            select(Job).where(
+                Job.complaint_id == complaint_id,
+                Job.kind == JobKind.resolution,
+                Job.case_version == complaint.case_version,
+                Job.input_revision == complaint.input_revision,
+                Job.status.in_([JobStatus.queued, JobStatus.running, JobStatus.failed]),
+            )
+        )
+    ).first()
+    if current_job is not None:
+        if current_job.status == JobStatus.failed:
+            raise conflict("The draft job failed; inspect and retry that job from Workspace")
+        # Classification may already have scheduled a draft while the case is
+        # still escalated. Preserve that intent instead of advancing past it.
+        raise conflict("Resolution generation is already queued or running")
     if complaint.status in TERMINAL_STATUSES:
         raise conflict("A response has already been approved")
     if complaint.status == ComplaintStatus.agent_triggered:
@@ -122,11 +112,21 @@ async def generate_resolution(
             raise conflict("A draft is already awaiting review; reject it to regenerate")
     if complaint.status == ComplaintStatus.draft_ready:
         raise conflict("A draft is already awaiting review; reject it to regenerate")
+    await admit(session, 1)
     complaint.status = ComplaintStatus.agent_triggered
     advance_case(complaint)
     session.add(complaint)
-    await _queue_after_commit(session, redis, complaint)
-    return ResolutionQueued(complaint_id=complaint_id)
+    job = await enqueue_job(
+        session,
+        complaint,
+        JobKind.resolution,
+        idempotency_key=key,
+        requested_by=current_user.id,
+        request_fingerprint=request_fingerprint,
+        max_attempts=settings.job_max_attempts,
+    )
+    await session.commit()
+    return ResolutionQueued(complaint_id=complaint_id, job_id=job.id)
 
 
 async def _read_revisions(
@@ -246,9 +246,20 @@ async def reject_resolution(
     complaint_id: uuid.UUID,
     body: RejectRequest,
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
     current_user: User = Depends(require_writer),
+    idempotency_key: str | None = Header(default=None, min_length=1, max_length=128),
 ) -> ResolutionQueued:
+    await admit(session)
+    # Exact review identity is a stable retry intent even without a client key.
+    review_key = idempotency_key or f"{body.resolution_id}:{body.expected_case_version}"
+    key = request_identity(current_user.id, f"resolutions.reject:{complaint_id}", review_key)
+    request_fingerprint = fingerprint(body.model_dump())
+    existing = await replay(session, key, request_fingerprint)
+    if existing is not None:
+        return ResolutionQueued(
+            complaint_id=complaint_id, job_id=existing.id, status=existing.status
+        )
+    await admit(session, 1)
     complaint, resolution, event = await review_revision(
         session,
         complaint_id,
@@ -261,5 +272,16 @@ async def reject_resolution(
     _require_current_classification(complaint)
     _audit(session, current_user, complaint, resolution, event)
     await session.flush()
-    await _queue_after_commit(session, redis, complaint, feedback=body.feedback)
-    return ResolutionQueued(complaint_id=complaint_id)
+    job = await enqueue_job(
+        session,
+        complaint,
+        JobKind.resolution,
+        idempotency_key=key,
+        requested_by=current_user.id,
+        review_event_id=event.id,
+        payload={"feedback": body.feedback},
+        request_fingerprint=request_fingerprint,
+        max_attempts=settings.job_max_attempts,
+    )
+    await session.commit()
+    return ResolutionQueued(complaint_id=complaint_id, job_id=job.id)

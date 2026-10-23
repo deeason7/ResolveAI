@@ -1,6 +1,6 @@
 # Single-container image for a Hugging Face Space (Docker SDK).
 #
-# A free Space gives you exactly one container, so the API and both Redis-stream
+# A free Space gives you exactly one container, so the API and PostgreSQL job
 # workers run side by side here under supervisord (see supervisord.conf): each
 # program restarts independently, so a crashed worker never takes the API down
 # with it. The multi-container topology for local / VM use lives in

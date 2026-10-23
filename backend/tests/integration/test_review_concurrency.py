@@ -12,10 +12,12 @@ from sqlmodel import select
 
 from app.database import get_session
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.resolution import GuardrailStatus, Resolution
 from app.models.review_event import ReviewEvent
 from app.models.user import User, UserRole
 from app.services.case_transitions import advance_case, lock_case
+from app.services.jobs import claim_job, enqueue_job
 from app.workers.resolution_worker import ResolutionWorker
 from tests.test_api_resolutions import _DUMMY_USER, _build_app
 from tests.test_resolution_worker import _result, _stub_factory
@@ -52,6 +54,14 @@ async def seed(factory, *, draft=True):
             session.add(resolution)
         await session.commit()
         return case, resolution
+
+
+async def queue_and_claim(factory, case):
+    async with factory() as session:
+        await enqueue_job(session, case, JobKind.resolution)
+        job = await claim_job(session, JobKind.resolution)
+        await session.commit()
+        return job
 
 
 def client(factory, redis):
@@ -95,10 +105,15 @@ async def test_competing_reviewers_have_one_success_one_actionable_conflict(
             asyncio.gather(*(review(action) for action in actions)), 10
         )
     assert len(connections) == 2
-    assert len([r for r in responses if r.status_code in (200, 202)]) == 1
-    conflicts = [r for r in responses if r.status_code == 409]
-    assert len(conflicts) == 1
-    assert "Reload" in conflicts[0].json()["detail"]
+    if actions == ("reject", "reject"):
+        # The exact same rejection identity/feedback returns the original intent.
+        assert [r.status_code for r in responses] == [202, 202]
+        assert responses[0].json()["job_id"] == responses[1].json()["job_id"]
+    else:
+        assert len([r for r in responses if r.status_code in (200, 202)]) == 1
+        conflicts = [r for r in responses if r.status_code == 409]
+        assert len(conflicts) == 1
+        assert "Reload" in conflicts[0].json()["detail"]
     async with pg_sessionmaker() as session:
         events = (await session.exec(select(ReviewEvent))).all()
         assert len(events) == 1
@@ -121,9 +136,11 @@ async def test_duplicate_generation_requests_admit_only_one(pg_sessionmaker):
 
         results = await asyncio.wait_for(asyncio.gather(generate(), generate()), 10)
     assert sorted(r.status_code for r in results) == [202, 409]
-    from app.config import settings
-
-    assert await redis.xlen(settings.resolution_queue) == 1
+    async with pg_sessionmaker() as session:
+        jobs = (await session.exec(select(Job))).all()
+        assert len(jobs) == 1
+        assert jobs[0].kind == JobKind.resolution
+        assert jobs[0].status == JobStatus.queued
 
 
 async def test_paused_duplicate_result_cannot_overwrite_a_later_approval(pg_sessionmaker):
@@ -138,18 +155,24 @@ async def test_paused_duplicate_result_cannot_overwrite_a_later_approval(pg_sess
             return _result()
 
     slow = ResolutionWorker(
-        redis,
         session_factory=pg_sessionmaker,
         agent_factory=lambda *_args, **_kwargs: PausedAgent(),
     )
-    fast = ResolutionWorker(
-        redis, session_factory=pg_sessionmaker, agent_factory=_stub_factory(_result())
-    )
-    message = {"complaint_id": str(case.id), "expected_case_version": "1", "input_revision": "1"}
-    task = asyncio.create_task(slow.process_message(message))
+    fast = ResolutionWorker(session_factory=pg_sessionmaker, agent_factory=_stub_factory(_result()))
+    job = await queue_and_claim(pg_sessionmaker, case)
+    task = asyncio.create_task(slow.process_job(job))
     try:
         await asyncio.wait_for(started.wait(), 5)
-        await asyncio.wait_for(fast.process_message(message), 5)
+        # Expire the paused owner's lease without relying on wall-clock sleeps.
+        async with pg_sessionmaker() as session:
+            await session.exec(
+                text(
+                    "UPDATE jobs SET lease_expires_at = timezone('UTC', clock_timestamp()) "
+                    "- interval '1 second' WHERE id = :id"
+                ).bindparams(id=job.id)
+            )
+            await session.commit()
+        assert await asyncio.wait_for(fast.run_once(), 5)
         async with client(pg_sessionmaker, redis) as ac:
             draft = (await ac.get(f"/api/v1/resolutions/{case.id}")).json()
             response = await ac.post(
@@ -161,7 +184,8 @@ async def test_paused_duplicate_result_cannot_overwrite_a_later_approval(pg_sess
         release.set()
         await asyncio.wait_for(task, 5)
     # Even a replay carrying rejection feedback must not reopen approved text.
-    await slow.process_message({**message, "feedback": "Old rejected draft feedback"})
+    job.payload = {"feedback": "Old rejected draft feedback"}
+    await slow.process_job(job)
     async with pg_sessionmaker() as session:
         stored = await session.get(Complaint, case.id)
         assert stored.status == ComplaintStatus.response_approved
@@ -179,17 +203,16 @@ async def test_concurrent_worker_results_allocate_one_revision(pg_sessionmaker):
             await asyncio.wait_for(barrier.wait(), 5)
             return _result()
 
-    redis = fakeredis.aioredis.FakeRedis(decode_responses=True)
     workers = [
         ResolutionWorker(
-            redis,
             session_factory=pg_sessionmaker,
             agent_factory=lambda *_a, **_k: SimultaneousAgent(),
         )
         for _ in range(2)
     ]
-    message = {"complaint_id": str(case.id), "expected_case_version": "1", "input_revision": "1"}
-    await asyncio.wait_for(asyncio.gather(*(w.process_message(message) for w in workers)), 10)
+    job = await queue_and_claim(pg_sessionmaker, case)
+    # Even duplicate callbacks for the same lease cannot persist two effects.
+    await asyncio.wait_for(asyncio.gather(*(w.process_job(job) for w in workers)), 10)
     async with pg_sessionmaker() as session:
         drafts = (await session.exec(select(Resolution))).all()
         assert len(drafts) == 1
@@ -208,15 +231,11 @@ async def test_input_change_fences_slow_resolution_without_a_status_change(pg_se
             return _result()
 
     worker = ResolutionWorker(
-        fakeredis.aioredis.FakeRedis(),
         session_factory=pg_sessionmaker,
         agent_factory=lambda *_a, **_k: PausedAgent(),
     )
-    task = asyncio.create_task(
-        worker.process_message(
-            {"complaint_id": str(case.id), "expected_case_version": "1", "input_revision": "1"}
-        )
-    )
+    job = await queue_and_claim(pg_sessionmaker, case)
+    task = asyncio.create_task(worker.process_job(job))
     try:
         await asyncio.wait_for(entered.wait(), 5)
         async with pg_sessionmaker() as session:

@@ -15,6 +15,7 @@ from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from app.models.job import JobStatus
 from app.models.resolution import GuardrailStatus
 from app.schemas.guardrails import GuardrailViolation
 
@@ -44,7 +45,8 @@ class ResolutionQueued(BaseModel):
     """202 body for the async trigger endpoints (generate, reject)."""
 
     complaint_id: uuid.UUID
-    status: Literal["queued"] = "queued"
+    job_id: uuid.UUID
+    status: JobStatus = JobStatus.queued
 
 
 class ReviewRequest(BaseModel):

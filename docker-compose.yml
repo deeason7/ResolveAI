@@ -17,7 +17,7 @@ services:
       timeout: 5s
       retries: 5
 
-  # ── Cache + Message Queue ──────────────────────────────────────────────────
+  # ── Session and rate-limit store ──────────────────────────────────────────────────
   redis:
     image: redis:7.2-alpine
     command: redis-server --requirepass ${REDIS_PASSWORD}
@@ -102,6 +102,42 @@ services:
       interval: 15s
       timeout: 5s
       retries: 5
+
+  classification-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.workers.classification_worker"]
+    env_file: .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  resolution-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.workers.resolution_worker"]
+    env_file: .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  index-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    command: ["python", "-m", "app.workers.index_worker"]
+    env_file: .env
+    volumes:
+      - ./backend:/app
+    depends_on:
+      postgres:
+        condition: service_healthy
 
   # ── Streamlit Frontend ─────────────────────────────────────────────────────
   frontend:

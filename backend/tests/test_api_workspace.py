@@ -1,10 +1,4 @@
-"""Tests for the Workspace pipeline API.
-
-SQLite via the session override, fakeredis behind get_redis, auth bypassed —
-these exercise the stage-count board, the two batch-enqueue routes (pending ->
-classification stream; escalated -> resolution stream with the agent_triggered
-flip), the per-call limit cap, and the 401 path. No worker or LLM involved.
-"""
+"""Transactional workspace batches and PostgreSQL-backed job health."""
 
 from __future__ import annotations
 
@@ -21,7 +15,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from app.config import settings
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
-from app.models.user import UserRole
+from app.models.job import Job, JobKind
+from app.models.user import User, UserRole
 
 BOARD_URL = "/api/v1/workspace/board"
 CLASSIFY_URL = "/api/v1/workspace/enqueue/classification"
@@ -39,7 +34,20 @@ async def factory():
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.drop_all)
         await conn.run_sync(SQLModel.metadata.create_all)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    sessions = async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
+    async with sessions() as session:
+        for user in (_DUMMY_USER, _VIEWER_USER):
+            session.add(
+                User(
+                    id=user.id,
+                    email=user.email,
+                    full_name="Synthetic operator",
+                    hashed_password="unused",
+                    role=user.role,
+                )
+            )
+        await session.commit()
+    yield sessions
 
 
 @pytest.fixture()
@@ -79,7 +87,15 @@ async def _seed(factory, **status_counts: int) -> None:
         for name, count in status_counts.items():
             status = ComplaintStatus[name]
             for _ in range(count):
-                s.add(Complaint(narrative="x", status=status))
+                s.add(
+                    Complaint(
+                        narrative="x",
+                        status=status,
+                        sentiment="negative",
+                        intent="dispute",
+                        urgency=3,
+                    )
+                )
         await s.commit()
 
 
@@ -98,10 +114,8 @@ async def test_board_counts_by_status(factory, fake_redis):
     assert body["agent_triggered"] == 0
     assert body["total"] == 11
     assert body["classification_unavailable"] == 0
-    # Stream telemetry is present and zeroed — no worker/groups in the fake.
-    assert body["classification_stream"]["name"] == settings.classification_queue
-    assert body["classification_stream"]["in_flight"] == 0
-    assert body["resolution_stream"]["name"] == settings.resolution_queue
+    assert {job["kind"] for job in body["jobs"]} == {"classification", "resolution", "index"}
+    assert all(job["queued"] == job["running"] == 0 for job in body["jobs"])
 
 
 @pytest.mark.asyncio
@@ -136,7 +150,7 @@ async def test_enqueue_classification_pushes_only_pending(factory, fake_redis):
         r = await ac.post(CLASSIFY_URL, params={"limit": 10})
     assert r.status_code == 200
     assert r.json()["enqueued"] == 4
-    assert await fake_redis.xlen(settings.classification_queue) == 4
+    assert len(await _jobs(factory, JobKind.classification)) == 4
 
 
 @pytest.mark.asyncio
@@ -146,7 +160,7 @@ async def test_enqueue_classification_respects_limit(factory, fake_redis):
     async with _client(app) as ac:
         r = await ac.post(CLASSIFY_URL, params={"limit": 3})
     assert r.json()["enqueued"] == 3
-    assert await fake_redis.xlen(settings.classification_queue) == 3
+    assert len(await _jobs(factory, JobKind.classification)) == 3
 
 
 @pytest.mark.asyncio
@@ -157,7 +171,7 @@ async def test_enqueue_resolution_flips_escalated(factory, fake_redis):
         r = await ac.post(RESOLVE_URL, params={"limit": 10})
     assert r.status_code == 200
     assert r.json()["enqueued"] == 2
-    assert await fake_redis.xlen(settings.resolution_queue) == 2
+    assert len(await _jobs(factory, JobKind.resolution)) == 2
     async with factory() as s:
         statuses = [v.value for v in (await s.exec(select(Complaint.status))).all()]
     assert statuses.count(ComplaintStatus.agent_triggered.value) == 2
@@ -238,11 +252,7 @@ async def test_board_survives_stream_telemetry_failure(factory, fake_redis):
     assert body["pending"] == 3
     assert body["escalated"] == 1
     assert body["total"] == 4
-    # ...and the transient telemetry degrades, never errors.
-    for stream in ("classification_stream", "resolution_stream"):
-        assert body[stream]["in_flight"] == 0
-        assert body[stream]["consumers"] == 0
-        assert body[stream]["lag"] is None
+    assert all(job["queued"] == job["running"] == 0 for job in body["jobs"])
 
 
 @pytest.mark.asyncio
@@ -258,7 +268,7 @@ async def test_board_empty_db_is_all_zeros(factory, fake_redis):
 
 
 @pytest.mark.asyncio
-async def test_enqueue_resolution_rolls_back_flips_when_xadd_fails(
+async def test_enqueue_resolution_rolls_back_flips_when_job_insert_fails(
     factory, fake_redis, monkeypatch
 ):
     """The flips are flushed before the XADD, so if a producer call raises the whole
@@ -269,7 +279,7 @@ async def test_enqueue_resolution_rolls_back_flips_when_xadd_fails(
         raise RuntimeError("stream unavailable")
 
     # Patch the producer the route imported into its own namespace.
-    monkeypatch.setattr("app.api.routes.workspace.enqueue_resolution", _raise)
+    monkeypatch.setattr("app.services.job_batches.enqueue_job", _raise)
     app = _build_app(factory, fake_redis)
     transport = ASGITransport(app=app, raise_app_exceptions=False)
     async with AsyncClient(transport=transport, base_url="http://test") as ac:
@@ -315,3 +325,46 @@ async def test_viewer_can_still_read_board(factory, fake_redis):
         r = await ac.get(BOARD_URL)
     assert r.status_code == 200
     assert r.json()["pending"] == 2
+
+
+async def _jobs(factory, kind):
+    async with factory() as session:
+        return (await session.exec(select(Job).where(Job.kind == kind))).all()
+
+
+@pytest.mark.asyncio
+async def test_repeated_batch_has_one_job_per_intent(factory, fake_redis):
+    await _seed(factory, pending=3)
+    async with _client(_build_app(factory, fake_redis)) as client:
+        first = await client.post(CLASSIFY_URL)
+        repeated = await client.post(CLASSIFY_URL)
+    assert first.json()["enqueued"] == 3
+    assert repeated.json()["enqueued"] == 0
+    assert len(await _jobs(factory, JobKind.classification)) == 3
+
+
+@pytest.mark.asyncio
+async def test_batch_capacity_rejection_rolls_back_whole_batch(factory, fake_redis, monkeypatch):
+    await _seed(factory, escalated=3)
+    monkeypatch.setattr(settings, "job_max_pending", 2)
+    async with _client(_build_app(factory, fake_redis)) as client:
+        response = await client.post(RESOLVE_URL)
+    assert response.status_code == 503
+    assert await _jobs(factory, JobKind.resolution) == []
+    async with factory() as session:
+        cases = (await session.exec(select(Complaint))).all()
+        assert all(c.status == ComplaintStatus.escalated and c.case_version == 1 for c in cases)
+
+
+@pytest.mark.asyncio
+async def test_no_redis_dispatch_during_batch(factory, fake_redis):
+    await _seed(factory, pending=2)
+
+    async def unavailable(*args, **kwargs):
+        raise AssertionError("Redis is not a job queue")
+
+    fake_redis.xadd = unavailable
+    async with _client(_build_app(factory, fake_redis)) as client:
+        response = await client.post(CLASSIFY_URL)
+    assert response.status_code == 200
+    assert len(await _jobs(factory, JobKind.classification)) == 2

@@ -2,13 +2,15 @@
 
 import asyncio
 import threading
-from unittest.mock import AsyncMock, Mock
+from unittest.mock import Mock
 
 import pytest
 from sqlmodel import select
 
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.llm_log import LLMLog
+from app.services.jobs import enqueue_job
 from app.workers.classification_worker import ClassificationWorker
 from tests.test_classification_worker import _outcome
 
@@ -19,17 +21,13 @@ async def test_unavailable_result_and_unknown_usage_commit_together(pg_sessionma
     case = Complaint(narrative="Synthetic intake during provider outage")
     async with pg_sessionmaker() as session:
         session.add(case)
+        await enqueue_job(session, case, JobKind.classification, max_attempts=1)
         await session.commit()
     worker = ClassificationWorker(
-        redis_client=AsyncMock(),
-        vector_store=Mock(),
-        graph_store=AsyncMock(),
         classifier=Mock(classify=Mock(return_value=_outcome(succeeded=False))),
         session_factory=pg_sessionmaker,
     )
-    await worker.process_message(
-        {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(case.id)}
-    )
+    assert await worker.run_once()
     async with pg_sessionmaker() as session:
         stored = await session.get(Complaint, case.id)
         assert stored.classification_outcome == ClassificationState.unavailable
@@ -40,9 +38,9 @@ async def test_unavailable_result_and_unknown_usage_commit_together(pg_sessionma
         assert log.complaint_id == case.id
         assert log.operation == "classify_unavailable"
         assert log.prompt_tokens is log.completion_tokens is log.cost_usd is None
-    worker.redis.xadd.assert_not_awaited()
-    worker.vector_store.upsert_complaint.assert_not_called()
-    worker.graph_store.upsert_complaint_entities.assert_not_awaited()
+        jobs = (await session.exec(select(Job))).all()
+        assert len(jobs) == 1
+        assert jobs[0].status == JobStatus.failed
 
 
 @pytest.mark.parametrize("succeeded", [False, True])
@@ -51,6 +49,7 @@ async def test_human_commit_during_inference_wins(pg_sessionmaker, succeeded):
     case = Complaint(narrative="Synthetic concurrent review")
     async with pg_sessionmaker() as session:
         session.add(case)
+        await enqueue_job(session, case, JobKind.classification)
         await session.commit()
 
     def inference(*_args, **_kwargs):
@@ -59,16 +58,10 @@ async def test_human_commit_during_inference_wins(pg_sessionmaker, succeeded):
         return _outcome(succeeded=succeeded, urgency=5)
 
     worker = ClassificationWorker(
-        redis_client=AsyncMock(),
-        vector_store=Mock(),
         classifier=Mock(classify=inference),
         session_factory=pg_sessionmaker,
     )
-    task = asyncio.create_task(
-        worker.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(case.id)}
-        )
-    )
+    task = asyncio.create_task(worker.run_once())
     try:
         assert await asyncio.to_thread(started.wait, 5)
         # Independent transaction commits while the worker is outside its row lock.
@@ -90,5 +83,6 @@ async def test_human_commit_during_inference_wins(pg_sessionmaker, succeeded):
         assert stored.classification_source == "manual"
         assert stored.urgency == 1
         assert (await session.exec(select(LLMLog))).all() == []
-    worker.redis.xadd.assert_not_awaited()
-    worker.vector_store.upsert_complaint.assert_not_called()
+        jobs = (await session.exec(select(Job))).all()
+        assert len(jobs) == 1
+        assert jobs[0].status == JobStatus.superseded

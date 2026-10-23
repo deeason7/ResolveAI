@@ -13,7 +13,10 @@ httpx.Client whose cookie jar survives Streamlit reruns.
 
 from __future__ import annotations
 
+import hashlib
+import json
 import os
+import uuid
 from typing import Any
 from urllib.parse import quote
 
@@ -158,12 +161,41 @@ def _request(method: str, path: str, *, _retried: bool = False, **kwargs: Any) -
 
     if resp.status_code == 401 and token and not _retried:
         if _try_refresh():
-            return _request(method, path, _retried=True, **kwargs)
+            return _request(method, path, _retried=True, headers=headers, **kwargs)
         clear_session()  # refresh dead too — force a clean re-login
 
     if resp.status_code >= 400:
         raise ApiError(resp.status_code, _detail(resp))
     return resp
+
+
+def _job_request(path: str, payload: dict | None = None) -> dict:
+    """Retain a request key after an uncertain transport result, across reruns."""
+    digest = hashlib.sha256(json.dumps(payload, sort_keys=True).encode()).hexdigest()
+    pending = st.session_state.setdefault("pending_job_requests", {})
+    identity = f"{path}:{digest}"
+    if identity not in pending:
+        if len(pending) >= 128:
+            raise ApiError(
+                0,
+                "Too many uncertain requests; check prior submissions before signing out and trying again.",
+            )
+        pending[identity] = str(uuid.uuid4())
+    try:
+        result = _request(
+            "POST",
+            path,
+            json=payload,
+            headers={"Idempotency-Key": pending[identity]},
+        ).json()
+    except ApiError as exc:
+        # A rejected request has no uncertain intent to retain. Network and
+        # server errors can follow a commit, so their key survives a rerun.
+        if 400 <= exc.status_code < 500:
+            pending.pop(identity, None)
+        raise
+    pending.pop(identity, None)
+    return result
 
 
 # ── auth & session ────────────────────────────────────────────────────────────
@@ -180,7 +212,14 @@ def current_user() -> dict | None:
 def clear_session() -> None:
     # "tour_step" belongs to tour.py — popped here so a demo logout fully
     # resets the guided tour (importing tour would be circular).
-    for key in (_TOKEN_KEY, _USER_KEY, _DEMO_KEY, "tour_step", "review_draft_snapshot"):
+    for key in (
+        _TOKEN_KEY,
+        _USER_KEY,
+        _DEMO_KEY,
+        "tour_step",
+        "review_draft_snapshot",
+        "pending_job_requests",
+    ):
         st.session_state.pop(key, None)
     client = st.session_state.pop(_CLIENT_KEY, None)
     if client is not None:
@@ -291,7 +330,7 @@ def get_complaint(complaint_id: str) -> dict:
 
 
 def submit_complaint(payload: dict) -> dict:
-    return _request("POST", "/complaints/", json=payload).json()
+    return _job_request("/complaints/", payload)
 
 
 @st.cache_data(ttl=CACHE_TTL_REFERENCE_S, max_entries=256, show_spinner=False)
@@ -370,7 +409,7 @@ def companies_risk(limit: int = 10) -> dict:
 
 
 def generate_resolution(complaint_id: str) -> dict:
-    return _request("POST", f"/resolutions/{complaint_id}/generate").json()
+    return _job_request(f"/resolutions/{complaint_id}/generate")
 
 
 def get_resolution(complaint_id: str) -> dict:
@@ -418,3 +457,18 @@ def enqueue_classification(limit: int = 50) -> dict:
 
 def enqueue_resolution_batch(limit: int = 50) -> dict:
     return _request("POST", "/workspace/enqueue/resolution", params={"limit": limit}).json()
+
+
+def failed_jobs(limit: int = 20) -> dict:
+    return _request("GET", "/jobs/", params={"status": "failed", "limit": limit}).json()
+
+
+def retry_job(job_id: str, *, expected_attempts: int, expected_retry_generation: int) -> dict:
+    return _request(
+        "POST",
+        f"/jobs/{job_id}/retry",
+        json={
+            "expected_attempts": expected_attempts,
+            "expected_retry_generation": expected_retry_generation,
+        },
+    ).json()

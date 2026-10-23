@@ -13,8 +13,8 @@
 #
 # Knobs (env vars):
 #   SEED_ROWS   corpus size to seed     (default 20000)
-#   CLASSIFY_N  complaints to classify  (default 10000)
-#   RESOLVE_N   resolutions to draft    (default 500)
+#   CLASSIFY_N  complaints to classify  (1–500; default 500)
+#   RESOLVE_N   resolutions to draft    (1–500; default 500)
 #   WORKERS     classification workers  (default 4, match OLLAMA_NUM_PARALLEL)
 #   MAX_HOURS   dead-man's switch: schedule OS shutdown after N hours so a hung
 #               run can't bleed credits. Unset = no watchdog. Only terminates if
@@ -24,7 +24,7 @@ set -euo pipefail
 cd "$(dirname "$0")/.."   # repo root
 
 SEED_ROWS="${SEED_ROWS:-20000}"
-CLASSIFY_N="${CLASSIFY_N:-10000}"
+CLASSIFY_N="${CLASSIFY_N:-500}"
 RESOLVE_N="${RESOLVE_N:-500}"
 WORKERS="${WORKERS:-4}"
 
@@ -36,6 +36,11 @@ DC="docker compose -f docker-compose.prod.yml -f $OVERLAY --profile local-llm"
 RUN="./scripts/run_live_batch.sh"
 say() { printf '\n\033[1;36m== %s ==\033[0m %s\n' "$1" "$(date -u +%H:%M:%SZ)"; }
 die() { printf '\n\033[1;31mFATAL: %s\033[0m\n' "$1" >&2; exit 1; }
+
+# Reject oversized batches before starting services, downloading models or seeding.
+for count in "$CLASSIFY_N" "$RESOLVE_N"; do
+  [[ "$count" =~ ^([1-9]|[1-9][0-9]|[1-4][0-9]{2}|500)$ ]] || die "CLASSIFY_N and RESOLVE_N must each be between 1 and 500."
+done
 
 # 0. Optional credit watchdog.
 if [ -n "${MAX_HOURS:-}" ]; then
@@ -56,7 +61,7 @@ command -v nvidia-smi >/dev/null && nvidia-smi -L || echo "(no nvidia-smi on hos
 #    ollama). Caddy/frontend are skipped — a headless metrics run needs no TLS
 #    or UI, and a placeholder DOMAIN would just spam ACME failures.
 say "compose up (build)"
-$DC up -d --build postgres redis qdrant neo4j ollama api classification-worker resolution-worker
+$DC up -d --build postgres redis qdrant neo4j ollama api classification-worker resolution-worker index-worker
 
 # 3. Load the fine-tuned model into Ollama from the mounted GGUF + Modelfile.
 say "ollama create resolveai-sentiment"
@@ -83,11 +88,11 @@ $DC up -d --scale classification-worker="$WORKERS"
 
 say "classify $CLASSIFY_N"
 $RUN classify "$CLASSIFY_N"
-$RUN wait classify 720      # block until the classification stream drains
+$RUN wait classify 720      # block until the classification jobs finish
 
 say "resolve $RESOLVE_N"
 $RUN resolve "$RESOLVE_N"
-$RUN wait resolve 720       # block until the resolution stream drains
+$RUN wait resolve 720       # block until the resolution jobs finish
 
 # 7. Harvest the grounded metrics.
 say "harvest -> ~/metrics.txt"

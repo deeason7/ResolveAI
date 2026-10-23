@@ -21,15 +21,16 @@ import logging
 import uuid
 from pathlib import Path
 
-import redis.asyncio as aioredis
-from fastapi import APIRouter, Depends, HTTPException, Query, status
+from fastapi import APIRouter, Depends, Header, HTTPException, Query, status
 from sqlalchemy import func
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from app.core.deps import get_current_user, get_redis, require_admin, require_writer
+from app.config import settings
+from app.core.deps import get_current_user, require_admin, require_writer
 from app.database import get_session
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import JobKind
 from app.models.user import User
 from app.schemas.complaint import (
     BulkImportRequest,
@@ -45,8 +46,9 @@ from app.schemas.complaint import (
 )
 from app.services.data_ingestion import ingest_cfpb_csv
 from app.services.embedder import embed_text
+from app.services.job_requests import admit, fingerprint, replay, request_identity
+from app.services.jobs import enqueue_job
 from app.services.vector_store import get_default_store
-from app.workers.classification_worker import enqueue_complaint
 
 logger = logging.getLogger(__name__)
 router = APIRouter(prefix="/complaints", tags=["complaints"])
@@ -272,15 +274,18 @@ async def similar_complaints(
 async def submit_complaint(
     body: ComplaintCreate,
     session: AsyncSession = Depends(get_session),
-    redis: aioredis.Redis = Depends(get_redis),
-    _: User = Depends(require_writer),
+    current_user: User = Depends(require_writer),
+    idempotency_key: str | None = Header(default=None, min_length=1, max_length=128),
 ) -> ComplaintPublic:
-    """Submit a new complaint and queue it for classification.
-
-    The enqueue is best-effort: status=pending is the durable signal, so a
-    Redis hiccup must not lose the submission — a sweep can re-enqueue pending
-    complaints later, exactly like the other recoverable side-channels.
-    """
+    """Persist a complaint and its classification job in one transaction."""
+    await admit(session)
+    key = request_identity(current_user.id, "complaints.submit", idempotency_key)
+    request_fingerprint = fingerprint(body.model_dump())
+    existing = await replay(session, key, request_fingerprint)
+    if existing is not None:
+        complaint = await session.get(Complaint, existing.complaint_id)
+        return ComplaintPublic.model_validate(complaint)
+    await admit(session, 1)
     complaint = Complaint(
         narrative=body.narrative,
         product=body.product,
@@ -292,17 +297,16 @@ async def submit_complaint(
     )
     session.add(complaint)
     await session.flush()
-    await session.refresh(complaint)
+    await enqueue_job(
+        session,
+        complaint,
+        JobKind.classification,
+        idempotency_key=key,
+        requested_by=current_user.id,
+        request_fingerprint=request_fingerprint,
+        max_attempts=settings.job_max_attempts,
+    )
     await session.commit()
-    try:
-        await enqueue_complaint(
-            redis,
-            complaint.id,
-            expected_case_version=complaint.case_version,
-            input_revision=complaint.input_revision,
-        )
-    except Exception:
-        logger.exception("classification enqueue failed; %s stays pending", complaint.id)
     logger.info("Complaint submitted: %s", complaint.id)
     return ComplaintPublic.model_validate(complaint)
 

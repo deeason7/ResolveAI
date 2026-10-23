@@ -1,25 +1,14 @@
-"""Tests for the Redis-stream resolution worker.
-
-The worker is driven against real fakeredis streams and a real (SQLite)
-session factory, with the agent replaced by a stub factory — so these cover
-the worker's own responsibilities (status choreography, transactional
-persistence, LLMOps logging, poison/stale handling) without running tools,
-guardrails, or LLM calls. The agent's internals are covered in
-test_agent_tools.py and test_guardrails.py.
-"""
+"""Durable resolution jobs retain exact draft/review invariants without live providers."""
 
 from __future__ import annotations
 
 import uuid
 
-import fakeredis.aioredis
 import pytest
-import pytest_asyncio
-from sqlalchemy.ext.asyncio import async_sessionmaker
-from sqlmodel import SQLModel, select
-from sqlmodel.ext.asyncio.session import AsyncSession
+from sqlmodel import select
 
 from app.models.complaint import ClassificationState, Complaint, ComplaintStatus
+from app.models.job import Job, JobKind, JobStatus
 from app.models.llm_log import LLMLog
 from app.models.resolution import GuardrailStatus, Resolution
 from app.schemas.agent import DraftedResponse
@@ -31,28 +20,9 @@ from app.services.agent.orchestrator import (
     AgentResult,
 )
 from app.services.agent.tools import DraftOutcome
-from app.workers.resolution_worker import (
-    OPERATION_DRAFT,
-    OPERATION_TONE,
-    ResolutionWorker,
-    enqueue_resolution,
-)
-
-
-@pytest_asyncio.fixture()
-async def factory():
-    import app.models  # noqa: F401 — registers tables on SQLModel.metadata
-    from app.database import engine
-
-    async with engine.begin() as conn:
-        await conn.run_sync(SQLModel.metadata.drop_all)
-        await conn.run_sync(SQLModel.metadata.create_all)
-    yield async_sessionmaker(bind=engine, class_=AsyncSession, expire_on_commit=False)
-
-
-@pytest.fixture()
-def redis_client():
-    return fakeredis.aioredis.FakeRedis(decode_responses=True)
+from app.services.jobs import enqueue_job
+from app.workers.resolution_worker import OPERATION_DRAFT, OPERATION_TONE, ResolutionWorker
+from tests.test_classification_worker import factory as factory
 
 
 def _draft(text: str = "Thank you for reaching out. " + "We will review your dispute. " * 10):
@@ -154,363 +124,168 @@ async def _seed(factory, **over) -> uuid.UUID:
         return c.id
 
 
-def _worker(redis_client, factory, result: AgentResult, agent_factory=None):
-    agent_factory = agent_factory or _stub_factory(result)
-    return ResolutionWorker(
-        redis_client=redis_client,
-        session_factory=factory,
-        agent_factory=agent_factory,
+async def _enqueue(factory, cid, *, payload=None, max_attempts=1):
+    async with factory() as session:
+        case = await session.get(Complaint, cid)
+        job = await enqueue_job(
+            session, case, JobKind.resolution, payload=payload, max_attempts=max_attempts
+        )
+        await session.commit()
+        return job
+
+
+@pytest.mark.parametrize(
+    "status,guardrail,case_status",
+    [
+        (STATUS_PASSED, GuardrailStatus.passed, ComplaintStatus.draft_ready),
+        (STATUS_FAILED, GuardrailStatus.failed, ComplaintStatus.needs_review),
+        (STATUS_UNAVAILABLE, GuardrailStatus.escalated, ComplaintStatus.needs_review),
+    ],
+)
+async def test_draft_and_telemetry_commit_with_completion(factory, status, guardrail, case_status):
+    cid = await _seed(factory)
+    job = await _enqueue(factory, cid)
+    violation = GuardrailViolation(layer="structural", code="too_short", message="Too short.")
+    agent = _stub_factory(
+        _result(status=status, drafts=2, violations=[violation], feedback="Revise")
     )
-
-
-async def _get_resolutions(factory, cid) -> list[Resolution]:
-    async with factory() as s:
-        stmt = select(Resolution).where(Resolution.complaint_id == cid)
-        return (await s.exec(stmt.order_by(Resolution.version))).all()
-
-
-class TestProcessMessage:
-    @pytest.mark.parametrize("stale", [False, True])
-    async def test_outage_or_stale_labels_do_not_run_agent(self, redis_client, factory, stale):
-        cid = await _seed(
-            factory,
-            classification_outcome=(
-                ClassificationState.succeeded if stale else ClassificationState.unavailable
-            ),
-            classification_stale=stale,
-        )
-        agent_factory = _stub_factory(_result())
-        w = _worker(redis_client, factory, None, agent_factory=agent_factory)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        assert agent_factory.calls == []
-        async with factory() as s:
-            assert (await s.exec(select(Resolution))).all() == []
-            assert (await s.get(Complaint, cid)).status == ComplaintStatus.escalated
-
-    async def test_passed_draft_persists_and_marks_draft_ready(self, redis_client, factory):
-        cid = await _seed(factory)
-        af = _stub_factory(_result())
-        w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.draft_ready
-        rows = await _get_resolutions(factory, cid)
-        assert len(rows) == 1
-        assert rows[0].version == 1
-        assert rows[0].guardrail_status == GuardrailStatus.passed
-        assert rows[0].guardrail_violations is None
-        assert rows[0].draft_text.startswith("Thank you")
-        assert "drafted via groq" in rows[0].reasoning_summary
-        # A retriable stream message does not advance the case at worker claim.
-        assert af.calls[0]["status_at_build"] == ComplaintStatus.escalated
-
-    async def test_llm_calls_and_judge_calls_logged_in_one_txn(self, redis_client, factory):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, _result(drafts=2, judges=1))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        async with factory() as s:
-            logs = (await s.exec(select(LLMLog))).all()
-        assert len(logs) == 3
-        ops = sorted(log.operation for log in logs)
-        assert ops == [OPERATION_DRAFT, OPERATION_DRAFT, OPERATION_TONE]
-        assert all(log.complaint_id == cid for log in logs)
-        # Cloud drafting calls are metered: groq model has a pricing entry.
-        draft_logs = [log for log in logs if log.operation == OPERATION_DRAFT]
-        assert all(log.cost_usd > 0 for log in draft_logs)
-
-    async def test_failed_draft_persists_violations_and_needs_review(self, redis_client, factory):
-        cid = await _seed(factory)
-        violations = [
-            GuardrailViolation(layer="structural", code="too_short", message="Too short."),
-            GuardrailViolation(
-                layer="regulatory_accuracy", code="ungrounded_citation", message="Fabricated."
-            ),
+    worker = ResolutionWorker(session_factory=factory, agent_factory=agent)
+    assert await worker.run_once()
+    assert not await worker.run_once()
+    async with factory() as session:
+        case = await session.get(Complaint, cid)
+        draft = (await session.exec(select(Resolution))).one()
+        logs = (await session.exec(select(LLMLog))).all()
+        stored = await session.get(Job, job.id)
+        assert case.status == case_status
+        assert case.case_version == 2 and case.input_revision == 1
+        assert draft.version == 1 and draft.input_revision == 1
+        assert draft.guardrail_status == guardrail
+        assert draft.guardrail_violations == [violation.model_dump()]
+        assert draft.guardrail_notes == "Revise"
+        assert draft.draft_text.startswith("Thank you")
+        assert "drafted via groq" in draft.reasoning_summary
+        assert sorted(log.operation for log in logs) == [
+            OPERATION_DRAFT,
+            OPERATION_DRAFT,
+            OPERATION_TONE,
         ]
-        w = _worker(
-            redis_client,
-            factory,
-            _result(status=STATUS_FAILED, violations=violations, feedback="fix it"),
-        )
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
+        assert all(log.cost_usd > 0 for log in logs)
+        assert stored.status == JobStatus.succeeded
+    assert agent.calls[0]["status_at_build"] == ComplaintStatus.escalated
 
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.needs_review
-        rows = await _get_resolutions(factory, cid)
-        assert rows[0].guardrail_status == GuardrailStatus.failed
-        assert rows[0].guardrail_notes == "fix it"
-        # The jsonb round-trip preserves the structured shape, not prose.
-        assert rows[0].guardrail_violations == [v.model_dump() for v in violations]
 
-    async def test_unavailable_with_no_draft_writes_no_resolution(self, redis_client, factory):
-        cid = await _seed(factory)
-        w = _worker(
-            redis_client,
-            factory,
-            _result(status=STATUS_UNAVAILABLE, with_draft=False, drafts=0, judges=0),
-        )
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.needs_review
-        assert await _get_resolutions(factory, cid) == []
-
-    async def test_unavailable_with_partial_draft_is_escalated(self, redis_client, factory):
-        # Attempt 1 drafted, attempt 2's LLM call died: keep the draft, mark it
-        # escalated (no guardrail verdict), and route the complaint to a human.
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, _result(status=STATUS_UNAVAILABLE, judges=0))
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        rows = await _get_resolutions(factory, cid)
-        assert rows[0].guardrail_status == GuardrailStatus.escalated
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.needs_review
-
-    async def test_feedback_message_builds_next_version_with_context(self, redis_client, factory):
-        cid = await _seed(factory)
-        w1 = _worker(redis_client, factory, _result())
-        await w1.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )  # version 1, draft_ready
-
-        from app.models.user import User
-        from app.services.case_transitions import review_revision
-
-        async with factory() as session:
-            user = User(
-                email="worker-review@example.test", full_name="Reviewer", hashed_password="unused"
+async def test_no_draft_provider_failure_exhausts_to_manual_review(factory):
+    cid = await _seed(factory)
+    job = await _enqueue(factory, cid)
+    worker = ResolutionWorker(
+        session_factory=factory,
+        agent_factory=_stub_factory(
+            _result(
+                status=STATUS_UNAVAILABLE,
+                with_draft=False,
+                drafts=0,
+                judges=0,
             )
-            session.add(user)
-            await session.flush()
-            first = (
-                await session.exec(select(Resolution).where(Resolution.complaint_id == cid))
-            ).one()
-            await review_revision(
-                session, cid, first.id, 2, user.id, action="rejected", feedback="more empathy"
-            )
-            await session.commit()
-
-        af = _stub_factory(_result())
-        w2 = _worker(redis_client, factory, None, agent_factory=af)
-        await w2.process_message(
-            {
-                "expected_case_version": "3",
-                "input_revision": "1",
-                "complaint_id": str(cid),
-                "feedback": "Cite the FCRA timeline",
-            }
-        )
-
-        rows = await _get_resolutions(factory, cid)
-        assert [r.version for r in rows] == [1, 2]
-        # The rejected draft + the reviewer's words reached the agent.
-        assert af.calls[0]["initial_feedback"] == "Cite the FCRA timeline"
-        assert af.calls[0]["previous_draft_text"] == rows[0].draft_text
-
-    async def test_draft_ready_without_feedback_is_stale_and_skipped(self, redis_client, factory):
-        cid = await _seed(factory, status=ComplaintStatus.draft_ready)
-        af = _stub_factory(_result())
-        w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-
-        assert af.calls == []  # agent never built
-        assert await _get_resolutions(factory, cid) == []
-        async with factory() as s:
-            c = await s.get(Complaint, cid)
-            assert c.status == ComplaintStatus.draft_ready  # untouched
-
-    async def test_resolved_complaint_is_never_redrafted(self, redis_client, factory):
-        cid = await _seed(factory, status=ComplaintStatus.resolved)
-        af = _stub_factory(_result())
-        w = _worker(redis_client, factory, None, agent_factory=af)
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        assert af.calls == []
-
-    async def test_unclassified_complaint_is_poison(self, redis_client, factory):
-        cid = await _seed(factory, sentiment=None, intent=None, urgency=None)
-        af = _stub_factory(_result())
-        w = _worker(redis_client, factory, None, agent_factory=af)
-        # Returns normally (-> ack); the agent has nothing to work from.
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        assert af.calls == []
-        assert await _get_resolutions(factory, cid) == []
-
-    async def test_out_of_vocabulary_classification_is_poison(self, redis_client, factory):
-        cid = await _seed(factory, sentiment="furious")  # not in the closed vocab
-        w = _worker(redis_client, factory, _result())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(cid)}
-        )
-        assert await _get_resolutions(factory, cid) == []
-
-    async def test_bad_uuid_is_poison(self, redis_client, factory):
-        w = _worker(redis_client, factory, _result())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": "not-a-uuid"}
-        )
-
-    async def test_missing_complaint_is_poison(self, redis_client, factory):
-        w = _worker(redis_client, factory, _result())
-        await w.process_message(
-            {"expected_case_version": "1", "input_revision": "1", "complaint_id": str(uuid.uuid4())}
-        )
-
-
-class TestStreamIntegration:
-    async def test_ensure_group_is_idempotent(self, redis_client, factory):
-        w = _worker(redis_client, factory, _result())
-        await w.ensure_group()
-        await w.ensure_group()  # second call must not raise BUSYGROUP
-
-    async def test_enqueue_then_handle_acks(self, redis_client, factory):
-        cid = await _seed(factory)
-        w = _worker(redis_client, factory, _result())
-        await w.ensure_group()
-        await enqueue_resolution(
-            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
-        )
-
-        resp = await redis_client.xreadgroup(
-            groupname=w.group,
-            consumername=w.consumer,
-            streams={w.stream: ">"},
-            count=10,
-        )
-        _stream, messages = resp[0]
-        message_id, fields = messages[0]
-        assert fields["complaint_id"] == str(cid)
-
-        await w._handle(message_id, fields)
-        summary = await redis_client.xpending(w.stream, w.group)
-        assert summary["pending"] == 0
-
-    async def test_enqueue_carries_feedback_field(self, redis_client):
-        await enqueue_resolution(
-            redis_client,
-            uuid.uuid4(),
-            feedback="too curt",
-            expected_case_version=1,
-            input_revision=1,
-            stream="s",
-        )
-        entries = await redis_client.xrange("s")
-        assert entries[0][1]["feedback"] == "too curt"
-
-    async def test_transient_failure_stays_pending_for_retry(self, redis_client, factory):
-        cid = await _seed(factory)
-
-        def _boom_factory(complaint, classification, **kwargs):
-            raise RuntimeError("infrastructure hiccup")
-
-        w = _worker(redis_client, factory, None, agent_factory=_boom_factory)
-        await w.ensure_group()
-        await enqueue_resolution(
-            redis_client, cid, expected_case_version=1, input_revision=1, stream=w.stream
-        )
-
-        resp = await redis_client.xreadgroup(
-            groupname=w.group,
-            consumername=w.consumer,
-            streams={w.stream: ">"},
-            count=10,
-        )
-        message_id, fields = resp[0][1][0]
-        await w._handle(message_id, fields)  # must swallow, not raise
-
-        summary = await redis_client.xpending(w.stream, w.group)
-        assert summary["pending"] == 1  # left for a future claim
-
-
-class TestPollCadence:
-    """Mirror of the classification worker's cadence gate (see its
-    TestPollCadence): the PEL sweep runs only every Nth cycle and the read
-    honors the configured block window.
-    """
-
-    async def test_sweeps_only_every_nth_cycle_and_honors_block(
-        self, redis_client, factory, monkeypatch
-    ):
-        from unittest.mock import AsyncMock
-
-        from app.config import Settings
-        from app.workers import resolution_worker as rw
-
-        sweeps = AsyncMock(return_value=0)
-        monkeypatch.setattr(rw, "reclaim_stale_messages", sweeps)
-        redis_client.xreadgroup = AsyncMock(return_value=[])
-
-        settings = Settings(worker_reclaim_every=2, worker_block_ms=30000)
-        w = ResolutionWorker(
-            redis_client=redis_client,
-            session_factory=factory,
-            agent_factory=_stub_factory(_result()),
-            settings=settings,
-        )
-
-        for cycle in range(4):
-            await w._tick(cycle)
-
-        assert sweeps.await_count == 2  # only cycles 0 and 2
-        assert redis_client.xreadgroup.await_args.kwargs["block"] == 30000
+        ),
+    )
+    await worker.run_once()
+    async with factory() as session:
+        assert (await session.exec(select(Resolution))).all() == []
+        case = await session.get(Complaint, cid)
+        stored = await session.get(Job, job.id)
+        assert case.status == ComplaintStatus.needs_review
+        assert case.case_version == 1
+        assert stored.status == JobStatus.failed
+        assert stored.last_error_code == "providers_unavailable"
 
 
 @pytest.mark.parametrize(
     "status",
     [ComplaintStatus.response_approved, ComplaintStatus.resolved, ComplaintStatus.draft_ready],
 )
-async def test_feedback_never_bypasses_review_lifecycle(factory, redis_client, status):
+async def test_feedback_cannot_reopen_reviewed_case(factory, status):
     cid = await _seed(factory, status=status)
+    job = await _enqueue(factory, cid, payload={"feedback": "Old rejection"})
     agent = _stub_factory(_result())
-    worker = _worker(redis_client, factory, None, agent_factory=agent)
-    await worker.process_message(
-        {
-            "complaint_id": str(cid),
-            "expected_case_version": "1",
-            "input_revision": "1",
-            "feedback": "Old feedback",
-        }
-    )
+    await ResolutionWorker(session_factory=factory, agent_factory=agent).run_once()
     assert agent.calls == []
-    assert await _get_resolutions(factory, cid) == []
+    async with factory() as session:
+        assert (await session.get(Job, job.id)).status == JobStatus.superseded
+        assert (await session.exec(select(Resolution))).all() == []
 
 
 @pytest.mark.parametrize(
-    "versions",
+    "overrides",
     [
-        {},
-        {"expected_case_version": "no", "input_revision": "1"},
-        {"expected_case_version": "0", "input_revision": "1"},
-        {"expected_case_version": "2", "input_revision": "1"},
-        {"expected_case_version": "1", "input_revision": "2"},
+        {"classification_outcome": ClassificationState.unavailable},
+        {"classification_stale": True},
+        {"sentiment": None, "intent": None, "urgency": None},
+        {"sentiment": "furious"},
     ],
 )
-async def test_unversioned_or_stale_trigger_cannot_run_inference(factory, redis_client, versions):
-    cid = await _seed(factory)
+async def test_unusable_classification_never_runs_agent(factory, overrides):
+    cid = await _seed(factory, **overrides)
+    job = await _enqueue(factory, cid)
     agent = _stub_factory(_result())
-    worker = _worker(redis_client, factory, None, agent_factory=agent)
-    await worker.process_message({"complaint_id": str(cid), **versions})
+    await ResolutionWorker(session_factory=factory, agent_factory=agent).run_once()
     assert agent.calls == []
+    async with factory() as session:
+        assert (await session.get(Job, job.id)).status in {JobStatus.failed, JobStatus.superseded}
+        assert (await session.exec(select(Resolution))).all() == []
+
+
+async def test_review_event_feedback_builds_next_revision(factory):
+    from app.models.user import User
+    from app.services.case_transitions import review_revision
+
+    cid = await _seed(factory)
+    await _enqueue(factory, cid)
+    await ResolutionWorker(
+        session_factory=factory, agent_factory=_stub_factory(_result())
+    ).run_once()
+    async with factory() as session:
+        user = User(
+            email="worker-review@example.test", full_name="Reviewer", hashed_password="unused"
+        )
+        session.add(user)
+        await session.flush()
+        first = (await session.exec(select(Resolution))).one()
+        case, _, event = await review_revision(
+            session, cid, first.id, 2, user.id, action="rejected", feedback="Cite the timeline"
+        )
+        await enqueue_job(
+            session,
+            case,
+            JobKind.resolution,
+            review_event_id=event.id,
+            payload={"feedback": event.feedback},
+        )
+        await session.commit()
+    agent = _stub_factory(_result())
+    await ResolutionWorker(session_factory=factory, agent_factory=agent).run_once()
+    async with factory() as session:
+        drafts = (await session.exec(select(Resolution).order_by(Resolution.version))).all()
+        assert [draft.version for draft in drafts] == [1, 2]
+        assert agent.calls[0]["previous_draft_text"] == drafts[0].draft_text
+        assert agent.calls[0]["initial_feedback"] == "Cite the timeline"
+
+
+async def test_transaction_failure_does_not_save_or_complete_draft(factory):
+    cid = await _seed(factory)
+    job = await _enqueue(factory, cid)
+
+    class BrokenTracker:
+        def record(self, *_args, **_kwargs):
+            raise RuntimeError("internal secret must not be recorded")
+
+    await ResolutionWorker(
+        session_factory=factory, agent_factory=_stub_factory(_result()), tracker=BrokenTracker()
+    ).run_once()
+    async with factory() as session:
+        assert (await session.exec(select(Resolution))).all() == []
+        assert (await session.exec(select(LLMLog))).all() == []
+        assert (await session.get(Complaint, cid)).case_version == 1
+        stored = await session.get(Job, job.id)
+        assert stored.status == JobStatus.failed
+        assert stored.last_error_code == "worker_error"

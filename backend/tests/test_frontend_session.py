@@ -177,3 +177,56 @@ def test_production_http_configuration_fails_before_creating_client(frontend, mo
 def test_error_payload_can_be_non_object_json(frontend):
     module, _ = frontend
     assert module._detail(httpx.Response(502, json=["bad gateway"])) == '["bad gateway"]'
+
+
+@pytest.mark.parametrize("failure", ["timeout", "503"])
+def test_uncertain_job_request_reuses_key_until_success(frontend, monkeypatch, failure):
+    module, state = frontend
+    keys = []
+
+    def handler(request):
+        keys.append(request.headers["Idempotency-Key"])
+        if len(keys) == 1:
+            if failure == "timeout":
+                raise httpx.ReadTimeout("synthetic timeout", request=request)
+            return httpx.Response(503, json={"detail": "Unavailable"})
+        return httpx.Response(201, json={"id": "same-case"})
+
+    transport(module, monkeypatch, handler)
+    with pytest.raises(module.ApiError):
+        module._job_request("/complaints/", {"narrative": "Synthetic fee dispute"})
+    assert len(state["pending_job_requests"]) == 1
+    assert module._job_request("/complaints/", {"narrative": "Synthetic fee dispute"}) == {
+        "id": "same-case"
+    }
+    assert keys[0] == keys[1]
+    assert state["pending_job_requests"] == {}
+
+
+def test_rejected_submissions_do_not_exhaust_pending_key_limit(frontend, monkeypatch):
+    module, state = frontend
+    transport(module, monkeypatch, lambda _: httpx.Response(422, json={"detail": "Invalid"}))
+    for index in range(130):
+        with pytest.raises(module.ApiError) as error:
+            module._job_request("/complaints/", {"narrative": str(index)})
+        assert error.value.status_code == 422
+    assert state["pending_job_requests"] == {}
+
+
+def test_refresh_replay_preserves_job_key_and_rotates_access_token(frontend, monkeypatch):
+    module, state = frontend
+    state[module._TOKEN_KEY] = "old"
+    requests = []
+
+    def handler(request):
+        if request.url.path.endswith("/refresh"):
+            return httpx.Response(200, json={"access_token": "new"})
+        requests.append(request)
+        if len(requests) == 1:
+            return httpx.Response(401, json={"detail": "Expired"})
+        return httpx.Response(202, json={"job_id": "same-job"})
+
+    transport(module, monkeypatch, handler)
+    assert module._job_request("/resolutions/synthetic/generate") == {"job_id": "same-job"}
+    assert requests[0].headers["Idempotency-Key"] == requests[1].headers["Idempotency-Key"]
+    assert requests[1].headers["Authorization"] == "Bearer new"
