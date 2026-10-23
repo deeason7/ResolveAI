@@ -79,3 +79,17 @@ docker stop resolveai-test-postgres
 
 CI runs integration tests as a separate job in the reusable workflow.
 Local success does not establish hosted CI success or branch-protection settings.
+
+## Dependency compatibility
+
+The application currently pins SQLModel 0.0.38 and the verified FastAPI 0.136.3 /
+SlowAPI 0.1.9 pairing. A fresh CI install on 2026-10-21 selected SQLModel 0.0.48
+and failed existing UTC-naive timestamp writes. SQLModel's
+[0.0.45 release notes](https://sqlmodel.tiangolo.com/release-notes/#0045-2026-09-21)
+describe that breaking datetime change. A timezone migration needs coordinated
+model, schema and backup checks; a dependency install must not implicitly change
+that contract. The newer FastAPI router representation also bypassed SlowAPI's
+default-limit discovery; the refresh outage regression test caught that failure.
+
+These focused compatibility pins do not lock the full deployment dependency graph.
+A clean resolved installation and full lockfiles remain separate verification work.

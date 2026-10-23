@@ -10,11 +10,15 @@ requires-python = ">=3.11"
 
 dependencies = [
     # Web framework
-    "fastapi>=0.115,<1.0",
+    # Keep the verified router/middleware pairing: newer lazy included routes
+    # bypass SlowAPI's default-limit handler discovery.
+    "fastapi==0.136.3",
     "uvicorn[standard]>=0.29,<1.0",
 
     # ORM + migrations
-    "sqlmodel>=0.0.22,<1.0",
+    # Match the verified UTC-naive schema until a deliberate datetime migration.
+    # SQLModel 0.0.45+ changes plain datetime columns to timezone-aware storage.
+    "sqlmodel==0.0.38",
     # We drive SQLAlchemy's async engine, which runs on greenlet. SQLAlchemy
     # only pulls greenlet in via a platform_machine marker listing aarch64 /
     # x86_64 / amd64 / win32 — Apple Silicon reports "arm64" and matches none
@@ -30,7 +34,7 @@ dependencies = [
     "PyJWT>=2.8,<3.0",
 
     # Rate limiting
-    "slowapi>=0.1.9,<1.0",
+    "slowapi==0.1.9",
 
     # Validation / settings
     "pydantic[email]>=2.7,<3.0",
